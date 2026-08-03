@@ -1,0 +1,187 @@
+# Reusable security workflow for Krateo repos.
+# HOST THIS AT:  krateo-platformops/.github/.github/workflows/security.yml   (org-level reusable)
+#   (or a dedicated krateo-platformops/krateo-ci repo — NOT `plumbing`, which is a Go module
+#    imported by only some repos and so can't reach the chart/TS repos.)
+#
+# Each repo pulls it in with a ~10-line caller (see ../caller.security.yml).
+# Auto-detects Go / Node / Helm-chart / Dockerfile — callers usually need NO inputs.
+name: security
+
+on:
+  workflow_call:
+    inputs:
+      go-version:
+        type: string
+        default: "1.23"
+      node-version:
+        type: string
+        default: "20"
+      image-ref:
+        description: "Optional built image to scan/sign (e.g. ghcr.io/krateo-platformops/foo:tag). Empty = skip image scan."
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+  security-events: write   # upload SARIF to GitHub code scanning
+  actions: read            # gitleaks-action reads workflow-run metadata
+  pull-requests: read      # gitleaks-action lists PR commits on pull_request events
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      go: ${{ steps.d.outputs.go }}
+      node: ${{ steps.d.outputs.node }}
+      chart: ${{ steps.d.outputs.chart }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: d
+        shell: bash
+        run: |
+          echo "go=$([ -f go.mod ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          echo "node=$([ -f package.json ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          if [ -n "$(git ls-files 'Chart.yaml' '**/Chart.yaml')" ]; then
+            echo "chart=true" >> "$GITHUB_OUTPUT"; else echo "chart=false" >> "$GITHUB_OUTPUT"; fi
+
+  # --- Repo-wide: dependency + IaC + secret scanning (all repos) ---
+  filesystem:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Trivy (vuln + misconfig + secrets)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scanners: vuln,secret,misconfig
+          format: sarif
+          output: trivy-fs.sarif
+          severity: CRITICAL,HIGH
+          exit-code: "0"        # report first; flip to "1" to gate once baselined
+      - name: Upload Trivy SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        continue-on-error: true   # code-scanning upload unavailable on private repos without GHAS
+        with: { sarif_file: trivy-fs.sarif, category: trivy-fs }
+      - name: Gitleaks (secret scan)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITLEAKS_ENABLE_COMMENTS: "false"        # would need pull-requests: write
+          GITLEAKS_ENABLE_SUMMARY: "true"
+
+  # --- SAST via CodeQL (Go and/or JS/TS) ---
+  codeql:
+    needs: detect
+    if: needs.detect.outputs.go == 'true' || needs.detect.outputs.node == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        language: ${{ fromJSON( format('[{0}{1}{2}]',
+          needs.detect.outputs.go == 'true' && '"go"' || '',
+          (needs.detect.outputs.go == 'true' && needs.detect.outputs.node == 'true') && ',' || '',
+          needs.detect.outputs.node == 'true' && '"javascript-typescript"' || '' ) ) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+      - uses: github/codeql-action/autobuild@v3
+      - uses: github/codeql-action/analyze@v3
+        continue-on-error: true   # result upload unavailable on private repos without GHAS
+        with:
+          category: "/language:${{ matrix.language }}"
+
+  # --- Go: vulnerable-deps + gosec ---
+  go:
+    needs: detect
+    if: needs.detect.outputs.go == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ inputs.go-version }}
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./... || true   # report first; drop `|| true` to gate
+      - name: gosec (SARIF)
+        uses: securego/gosec@master
+        with: { args: "-no-fail -fmt sarif -out gosec.sarif ./..." }
+      - uses: github/codeql-action/upload-sarif@v3
+        continue-on-error: true   # code-scanning upload unavailable on private repos without GHAS
+        with: { sarif_file: gosec.sarif, category: gosec }
+
+  # --- Node/TS: dependency audit ---
+  node:
+    needs: detect
+    if: needs.detect.outputs.node == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+      - name: Dependency audit
+        run: |
+          if [ -f pnpm-lock.yaml ]; then
+            corepack enable && pnpm i --frozen-lockfile --ignore-scripts && pnpm audit --audit-level=high || true
+          else
+            npm ci --ignore-scripts || npm i --ignore-scripts
+            npm audit --audit-level=high || true
+          fi
+
+  # --- Helm charts: lint + policy + IaC ---
+  chart:
+    needs: detect
+    if: needs.detect.outputs.chart == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: helm lint
+        run: |
+          for c in $(git ls-files '**/Chart.yaml' 'Chart.yaml' | xargs -n1 dirname | sort -u); do
+            echo "== helm lint $c =="; helm lint "$c" || true
+          done
+      - name: kube-linter
+        uses: stackrox/kube-linter-action@v1
+        with: { directory: . }
+        continue-on-error: true
+
+  # --- SBOM (always) + optional image scan ---
+  sbom:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate SBOM (SPDX)
+        uses: anchore/sbom-action@v0
+        with: { path: ".", format: spdx-json, output-file: sbom.spdx.json }
+      - uses: actions/upload-artifact@v4
+        with: { name: sbom, path: sbom.spdx.json }
+      - name: Trivy image scan (optional)
+        if: inputs.image-ref != ''
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ inputs.image-ref }}
+          format: sarif
+          output: trivy-image.sarif
+          severity: CRITICAL,HIGH
+          exit-code: "0"
+      - name: Upload image SARIF
+        if: inputs.image-ref != ''
+        uses: github/codeql-action/upload-sarif@v3
+        continue-on-error: true   # code-scanning upload unavailable on private repos without GHAS
+        with: { sarif_file: trivy-image.sarif, category: trivy-image }
+
+  # --- cosign keyless signing: enable per repo that publishes images (see README) ---
+  # sign:
+  #   if: startsWith(github.ref, 'refs/tags/') && inputs.image-ref != ''
+  #   runs-on: ubuntu-latest
+  #   permissions: { id-token: write, packages: write }
+  #   steps:
+  #     - uses: sigstore/cosign-installer@v3
+  #     - run: cosign sign --yes ${{ inputs.image-ref }}
