@@ -64,11 +64,12 @@ jobs:
         continue-on-error: true   # code-scanning upload unavailable on private repos without GHAS
         with: { sarif_file: trivy-fs.sarif, category: trivy-fs }
       - name: Gitleaks (secret scan)
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          GITLEAKS_ENABLE_COMMENTS: "false"        # would need pull-requests: write
-          GITLEAKS_ENABLE_SUMMARY: "true"
+        # gitleaks-action@v2 requires a paid license for ORG-owned repos; the gitleaks TOOL is MIT/free.
+        # Run the official image directly (no license) — same engine + default rules, gates on findings.
+        # Scans the checked-out tree (--no-git); drop --no-git to also scan full history once baselined.
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/repo" ghcr.io/gitleaks/gitleaks:latest \
+            detect --source=/repo --no-git --redact --no-banner --exit-code=1
 
   # --- SAST via CodeQL (Go and/or JS/TS) ---
   codeql:
