@@ -32,6 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       go: ${{ steps.d.outputs.go }}
+      gomods: ${{ steps.d.outputs.gomods }}
       node: ${{ steps.d.outputs.node }}
       chart: ${{ steps.d.outputs.chart }}
     steps:
@@ -39,7 +40,10 @@ jobs:
       - id: d
         shell: bash
         run: |
-          echo "go=$([ -f go.mod ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          mods=$(find . -maxdepth 3 -name go.mod -not -path "*/vendor/*" -not -path "*/.git/*" | xargs -r -n1 dirname | sed "s#^\./##" | sort -u | jq -R . | jq -sc .)
+          [ -z "$mods" ] && mods="[]"
+          [ "$mods" = "[]" ] && echo "go=false" >> "$GITHUB_OUTPUT" || echo "go=true" >> "$GITHUB_OUTPUT"
+          echo "gomods=$mods" >> "$GITHUB_OUTPUT"
           echo "node=$([ -f package.json ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
           if [ -n "$(git ls-files 'Chart.yaml' '**/Chart.yaml')" ]; then
             echo "chart=true" >> "$GITHUB_OUTPUT"; else echo "chart=false" >> "$GITHUB_OUTPUT"; fi
@@ -103,18 +107,25 @@ jobs:
     needs: detect
     if: needs.detect.outputs.go == 'true'
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        mod: ${{ fromJSON(needs.detect.outputs.gomods) }}
+    defaults:
+      run:
+        working-directory: ${{ matrix.mod }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: ${{ inputs.go-version }}
+          go-version-file: ${{ matrix.mod }}/go.mod
       - name: govulncheck
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
           govulncheck ./... || true   # report first; drop `|| true` to gate
       - name: gosec (SARIF)
         uses: securego/gosec@master
-        with: { args: "-no-fail -fmt sarif -out gosec.sarif ./..." }
+        with: { args: "-no-fail -fmt sarif -out gosec.sarif ${{ matrix.mod }}/..." }
 
       - name: otel-audit (OTel adherence + semconv + audit-signal + deps)
         # Audits deployable Go components for OTel observability adherence (self-skips libs & non-OTel repos).
