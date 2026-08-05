@@ -1,16 +1,14 @@
 # Reusable: THE canonical multi-platform component image build. One source of truth for the
-# "build & push image" step across every krateo-* code repo — call it from each repo's
-# release-tag.yaml so the multi-arch build can never drift per-repo again (the frontend
-# amd64-only regression is exactly what this prevents). Per-repo variation is expressed via
-# inputs; the CRD-publish step stays in each repo's release-tag.yaml because it genuinely
-# differs (Go `make generate` vs frontend's npm/krateoctl).
+# "build & push image" step across every krateo-* code repo — called from release-tag.yaml
+# (push: true) AND from release-pullrequest.yaml (push: false, validate-only). Per-repo
+# variation via inputs; the CRD-publish step stays in each repo's release-tag.yaml.
 name: component-image-build
 
 on:
   workflow_call:
     inputs:
       context:
-        description: "Docker build context (e.g. go/snowplow, go/core-provider, ui)."
+        description: "Docker build context (e.g. go/snowplow, go/authn, ui)."
         type: string
         default: "."
       dockerfile:
@@ -25,6 +23,10 @@ on:
         description: "Extra docker build args (newline-separated KEY=VALUE)."
         type: string
         default: ""
+      push:
+        description: "Push the image (true for release tags; false for PR validate-only builds)."
+        type: boolean
+        default: true
 
 jobs:
   build:
@@ -50,7 +52,6 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # QEMU is required for the non-native (arm64) leg of the multi-platform build.
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
@@ -63,10 +64,11 @@ jobs:
           context: ${{ inputs.context }}
           file: ${{ inputs.dockerfile != '' && inputs.dockerfile || format('{0}/Dockerfile', inputs.context) }}
           platforms: ${{ inputs.platforms }}
-          push: true
+          push: ${{ inputs.push }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: ${{ inputs.build_args }}
 
       - name: Inspect image (verify multi-arch manifest)
+        if: ${{ inputs.push }}
         run: docker buildx imagetools inspect ghcr.io/${{ github.repository }}:${{ steps.meta.outputs.version }}
