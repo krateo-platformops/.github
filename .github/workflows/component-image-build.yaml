@@ -1,40 +1,35 @@
-# Reusable: THE canonical multi-platform component image build. One source of truth for the
-# "build & push image" step across every krateo-* code repo — called from release-tag.yaml
-# (push: true) AND from release-pullrequest.yaml (push: false, validate-only). Per-repo
-# variation via inputs; the CRD-publish step stays in each repo's release-tag.yaml.
+# Reusable: THE canonical multi-platform image build for every krateo-* code repo — flat, folded,
+# or monorepo, there is ONE shape. The caller passes a `modules` JSON list (one element per image);
+# the matrix lives HERE, so a single-image repo (1 element) and a monorepo (N elements) call this the
+# exact same way. Image name is always ghcr.io/<owner>/<mod>. Used by release-tag (push:true) and
+# release-pullrequest (push:false).
 name: component-image-build
 
 on:
   workflow_call:
     inputs:
-      context:
-        description: "Docker build context (e.g. go/snowplow, go/authn, ui)."
+      modules:
+        description: 'JSON array of images: [{"mod":"<name>","context":"<dir>","dockerfile":"<opt>"}]. 1 element = single-image repo; N = monorepo.'
         type: string
-        default: "."
-      dockerfile:
-        description: "Dockerfile path. Empty => <context>/Dockerfile."
-        type: string
-        default: ""
       platforms:
         description: "Target platforms for the manifest list."
         type: string
         default: "linux/amd64,linux/arm64"
       build_args:
-        description: "Extra docker build args (newline-separated KEY=VALUE)."
+        description: "Extra docker build args (newline-separated KEY=VALUE); applied to every module."
         type: string
         default: ""
       push:
-        description: "Push the image (true for release tags; false for PR validate-only builds)."
+        description: "Push (true for release tags; false for PR validate-only builds)."
         type: boolean
         default: true
-      image:
-        description: "Image name without tag (e.g. ghcr.io/<owner>/<module> for matrix monorepos). Empty => ghcr.io/<this repo>."
-        type: string
-        default: ""
 
 jobs:
   build:
     name: Build & push image (multi-platform)
+    strategy:
+      matrix:
+        include: ${{ fromJSON(inputs.modules) }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -47,7 +42,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ${{ inputs.image != '' && inputs.image || format('ghcr.io/{0}', github.repository) }}
+          images: ghcr.io/${{ github.repository_owner }}/${{ matrix.mod }}
 
       - name: Login to GHCR
         uses: docker/login-action@v4
@@ -65,8 +60,8 @@ jobs:
       - name: Build and push
         uses: docker/build-push-action@v7
         with:
-          context: ${{ inputs.context }}
-          file: ${{ inputs.dockerfile != '' && inputs.dockerfile || format('{0}/Dockerfile', inputs.context) }}
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile != '' && matrix.dockerfile || format('{0}/Dockerfile', matrix.context) }}
           platforms: ${{ inputs.platforms }}
           push: ${{ inputs.push }}
           tags: ${{ steps.meta.outputs.tags }}
@@ -75,4 +70,4 @@ jobs:
 
       - name: Inspect image (verify multi-arch manifest)
         if: ${{ inputs.push }}
-        run: docker buildx imagetools inspect ${{ inputs.image != '' && inputs.image || format('ghcr.io/{0}', github.repository) }}:${{ steps.meta.outputs.version }}
+        run: docker buildx imagetools inspect ghcr.io/${{ github.repository_owner }}/${{ matrix.mod }}:${{ steps.meta.outputs.version }}
