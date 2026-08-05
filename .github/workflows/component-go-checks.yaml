@@ -1,6 +1,7 @@
 # Reusable: canonical Go PR checks (unit tests + optional CRD-drift guard) for every krateo-* Go
 # code repo — called from release-pullrequest.yaml. Runs from the module dir so it survives the
-# go/<repo> monorepo fold (root-relative CI is exactly what broke after the fold).
+# go/<repo> monorepo fold. The test invocation is passed verbatim via `test_args` so each repo keeps
+# its exact behavior (build tags, timeouts, -coverpkg, …) while sharing ONE workflow.
 name: component-go-checks
 
 on:
@@ -14,6 +15,10 @@ on:
         description: "Run the CRD-drift guard (make generate + git diff crds/) from the module dir."
         type: boolean
         default: false
+      test_args:
+        description: "Args appended to `go test` (verbatim). Set per repo to preserve tags/flags."
+        type: string
+        default: "-race -coverprofile=coverage.txt -covermode=atomic ./..."
     secrets:
       CODECOV_TOKEN:
         required: false
@@ -32,7 +37,7 @@ jobs:
         run: go mod download
       - name: Run coverage
         working-directory: ${{ inputs.module }}
-        run: go test -race -coverprofile=coverage.txt -covermode=atomic ./...
+        run: go test ${{ inputs.test_args }}
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
         continue-on-error: true
