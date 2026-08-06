@@ -115,9 +115,19 @@ The README links; it never duplicates bundle content.
   against the actual chart. No placeholders.
 - **Fix the wrong**: every claim touched is re-grounded in current code; stale paths,
   self-referencing indexes, and dead-org references are corrected in the same PR.
-- **Preserve the good**: existing quality prose (architecture docs, wiring docs,
-  gotchas) is moved into the bundle (usually as `overview.md` or extension files),
-  gains frontmatter, gets drift-fixed — and is not re-authored for style.
+- **Nothing survives unverified**: every existing doc is re-derived from the
+  implementation — each substantive claim traced to current source before it is
+  kept; diverged content is rewritten, not annotated around. Prose style may be
+  preserved; content may not be presumed.
+- **ADRs are living records**: each is re-verified against what was actually
+  built. Where implementation diverged from the decision, the ADR is rewritten to
+  record both the decision and the implemented reality, with a frontmatter
+  `status: implemented | diverged | superseded-by:<file>` field. An ADR that
+  documents a road not taken is a lie with a date on it.
+- **Dated point-in-time records are the one exception**: RCAs, ship-logs and
+  benchmark notes keep their historical content, keep their original timestamps,
+  and are labeled as archives in `index.md`/`llms.txt` — they must never
+  masquerade as current state.
 - **Dead-org-only dependencies**: when a doc depends on a tool/artifact that exists
   only under a dead org (no `krateo-platformops` home), do not link the dead org —
   replace the dependency with a supported equivalent in the doc, or state plainly
