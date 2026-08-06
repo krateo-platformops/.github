@@ -150,7 +150,7 @@ jobs:
           llms = DOCS/"llms.txt"
           if llms.is_file():
               for line in llms.read_text(encoding="utf-8", errors="replace").splitlines():
-                  m = re.match(r"^((?:docs|examples)/\S+?)(?::|\s|$)", line.strip())
+                  m = re.match(r"^([A-Za-z0-9_./-]+/[A-Za-z0-9_./-]+\.[a-z]+)(?::|\s|$)", line.strip())
                   if m and not pathlib.Path(m.group(1)).exists():
                       errors.append(f"{DOCS}/llms.txt: entry '{m.group(1)}' does not exist")
 

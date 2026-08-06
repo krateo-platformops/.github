@@ -118,6 +118,13 @@ The README links; it never duplicates bundle content.
 - **Preserve the good**: existing quality prose (architecture docs, wiring docs,
   gotchas) is moved into the bundle (usually as `overview.md` or extension files),
   gains frontmatter, gets drift-fixed — and is not re-authored for style.
+- **Dead-org-only dependencies**: when a doc depends on a tool/artifact that exists
+  only under a dead org (no `krateo-platformops` home), do not link the dead org —
+  replace the dependency with a supported equivalent in the doc, or state plainly
+  that the tool is unmigrated. The banned-string check has no exceptions.
+- **Deep corpora stay code-adjacent**: repos with large existing doc trees (ADRs,
+  RCAs, deep dives) keep them in place; the bundle's `index.md` + `llms.txt` curate
+  them. The invariant nine are the map, not the archive.
 
 ## 5. `examples/` — runnable, paired, honest
 
