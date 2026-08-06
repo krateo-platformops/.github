@@ -1,0 +1,161 @@
+# Reusable: THE canonical documentation-conformance check for every krateo-* repo — enforces the
+# Krateo Documentation Standard (DOCS-STANDARD.md in this repo): the invariant core file set
+# (README + docs/{index,overview,usage,configuration,api,examples,release,log}.md + docs/llms.txt
+# + examples/), OKF frontmatter on every docs markdown, resolvable links, and the dead-org ban.
+# The linter is inline (self-contained) so callers need no second checkout — byte-identical
+# everywhere, same philosophy as security.yml / component-image-build.yaml.
+name: lint-docs
+
+on:
+  workflow_call:
+    inputs:
+      docs_dir:
+        description: "Docs bundle directory (the standard says docs/; override only for transition PRs)."
+        type: string
+        default: "docs"
+
+permissions:
+  contents: read
+
+jobs:
+  lint-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0   # tags, for the timestamp-freshness warning
+      - name: Enforce the Krateo Documentation Standard
+        env:
+          DOCS_DIR: ${{ inputs.docs_dir }}
+        run: |
+          python3 - <<'PYEOF'
+          import os, re, sys, subprocess, pathlib, datetime
+
+          DOCS = pathlib.Path(os.environ.get("DOCS_DIR", "docs"))
+          errors, warns = [], []
+
+          CORE = ["index.md","overview.md","usage.md","configuration.md","api.md",
+                  "examples.md","release.md","log.md","llms.txt"]
+          README_SECTIONS = ["## What is this","## Install","## Configure",
+                             "## Examples","## Docs","## Develop & release"]
+          TYPES = {"Component","Library","ChartRepo","Agent","McpServer","Architecture",
+                   "Usage","Configuration","API","ExampleIndex","Runbook","Log","Example",
+                   "CRD","Decision","Integration","Chart","Standard"}
+          CORE_TYPE = {"overview.md":"Architecture","usage.md":"Usage",
+                       "configuration.md":"Configuration","api.md":"API",
+                       "examples.md":"ExampleIndex","release.md":"Runbook","log.md":"Log"}
+          INDEX_TYPES = {"Component","Library","ChartRepo","Agent","McpServer"}
+          BANNED = ["krateoplatformops/","github.com/braghettos"]
+
+          # 1. core file set
+          if not pathlib.Path("README.md").is_file():
+              errors.append("README.md missing")
+          for f in CORE:
+              if not (DOCS/f).is_file():
+                  errors.append(f"{DOCS}/{f} missing (core file set is invariant)")
+          exdir = pathlib.Path("examples")
+          exdirs = [d for d in exdir.iterdir() if d.is_dir()] if exdir.is_dir() else []
+          if not exdirs:
+              errors.append("examples/ missing or empty (at least one example dir required)")
+          for d in exdirs:
+              if not (d/"README.md").is_file():
+                  errors.append(f"{d}/README.md missing (every example is paired with an Example doc)")
+
+          # 2. README section order
+          if pathlib.Path("README.md").is_file():
+              body = pathlib.Path("README.md").read_text(encoding="utf-8", errors="replace")
+              pos = -1
+              for s in README_SECTIONS:
+                  p = body.find(s)
+                  if p < 0: errors.append(f"README.md: section '{s}' missing")
+                  elif p < pos: errors.append(f"README.md: section '{s}' out of order")
+                  else: pos = p
+
+          # 3. frontmatter on every docs/**/*.md and examples/*/README.md
+          def frontmatter(path):
+              text = path.read_text(encoding="utf-8", errors="replace")
+              if not text.startswith("---\n"):
+                  return None, text
+              end = text.find("\n---", 4)
+              if end < 0: return None, text
+              fm = {}
+              for line in text[4:end].splitlines():
+                  m = re.match(r"^(\w[\w-]*):\s*(.*)$", line)
+                  if m: fm[m.group(1)] = m.group(2).strip()
+              return fm, text
+
+          md_files = list(DOCS.rglob("*.md")) if DOCS.is_dir() else []
+          md_files += [d/"README.md" for d in exdirs if (d/"README.md").is_file()]
+          latest_tag_date = None
+          try:
+              tag = subprocess.run(["git","describe","--tags","--abbrev=0"],
+                                   capture_output=True, text=True).stdout.strip()
+              if tag:
+                  iso = subprocess.run(["git","log","-1","--format=%cI",tag],
+                                       capture_output=True, text=True).stdout.strip()
+                  if iso: latest_tag_date = datetime.datetime.fromisoformat(iso)
+          except Exception: pass
+
+          for f in md_files:
+              fm, text = frontmatter(f)
+              rel = str(f)
+              if fm is None:
+                  errors.append(f"{rel}: missing YAML frontmatter"); continue
+              t = fm.get("type","")
+              if t not in TYPES:
+                  errors.append(f"{rel}: frontmatter type '{t}' not in the registry")
+              base = f.name
+              if f.parent == DOCS and base in CORE_TYPE and t != CORE_TYPE[base]:
+                  errors.append(f"{rel}: core file must be type {CORE_TYPE[base]} (got '{t}')")
+              if f.parent == DOCS and base == "index.md" and t not in INDEX_TYPES:
+                  errors.append(f"{rel}: index.md type must be one of {sorted(INDEX_TYPES)}")
+              if f.parent.parent == exdir and base == "README.md" and t != "Example":
+                  errors.append(f"{rel}: example doc must be type Example")
+              for k in ("title","description"):
+                  if not fm.get(k): errors.append(f"{rel}: frontmatter '{k}' missing/empty")
+              ts = fm.get("timestamp","")
+              if ts and latest_tag_date:
+                  try:
+                      tsd = datetime.datetime.fromisoformat(ts.replace("Z","+00:00"))
+                      if f.parent == DOCS and tsd < latest_tag_date:
+                          warns.append(f"{rel}: timestamp {ts} predates the latest release tag (review for drift)")
+                  except ValueError:
+                      errors.append(f"{rel}: timestamp not ISO 8601")
+
+              # 4. relative links resolve
+              for m in re.finditer(r"\[[^\]]*\]\(([^)#\s]+)(?:#[^)]*)?\)", text):
+                  target = m.group(1)
+                  if re.match(r"^[a-z]+://|^mailto:", target): continue
+                  resolved = (f.parent / target).resolve()
+                  if not resolved.exists():
+                      errors.append(f"{rel}: broken relative link '{target}'")
+
+              # 5. dead orgs
+              for b in BANNED:
+                  if b in text:
+                      errors.append(f"{rel}: banned reference '{b}' (dead org)")
+
+          # dead orgs + links in README too
+          if pathlib.Path("README.md").is_file():
+              text = pathlib.Path("README.md").read_text(encoding="utf-8", errors="replace")
+              for b in BANNED:
+                  if b in text: errors.append(f"README.md: banned reference '{b}' (dead org)")
+              for m in re.finditer(r"\[[^\]]*\]\(([^)#\s]+)(?:#[^)]*)?\)", text):
+                  target = m.group(1)
+                  if re.match(r"^[a-z]+://|^mailto:", target): continue
+                  if not pathlib.Path(target).exists():
+                      errors.append(f"README.md: broken relative link '{target}'")
+
+          # 6. llms.txt entries resolve
+          llms = DOCS/"llms.txt"
+          if llms.is_file():
+              for line in llms.read_text(encoding="utf-8", errors="replace").splitlines():
+                  m = re.match(r"^((?:docs|examples)/\S+?)(?::|\s|$)", line.strip())
+                  if m and not pathlib.Path(m.group(1)).exists():
+                      errors.append(f"{DOCS}/llms.txt: entry '{m.group(1)}' does not exist")
+
+          for w in warns: print(f"::warning::{w}")
+          for e in errors: print(f"::error::{e}")
+          print(f"lint-docs: {len(errors)} error(s), {len(warns)} warning(s)")
+          sys.exit(1 if errors else 0)
+          PYEOF
