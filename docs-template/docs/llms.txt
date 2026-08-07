@@ -1,0 +1,11 @@
+# <repo-name> — LLM doc index (pinned: <release-tag>)
+# One line per file; regenerate the pin on release.
+docs/index.md: the map of this bundle
+docs/overview.md: what it does and how it works
+docs/usage.md: how to install / consume it
+docs/configuration.md: the whole config surface
+docs/api.md: the contract it exposes
+docs/examples.md: examples index
+docs/release.md: how a release ships
+docs/log.md: curated history
+examples/minimal/README.md: minimal runnable example
