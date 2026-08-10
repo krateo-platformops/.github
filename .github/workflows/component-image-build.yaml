@@ -28,6 +28,13 @@ jobs:
   build:
     name: Build & push image (multi-platform)
     strategy:
+      # One module's failure must not cancel the others. Default fail-fast cancels every in-flight
+      # matrix leg on the first failure, so in a monorepo a problem confined to ONE image (a GHCR
+      # permission_denied on its package, a broken Dockerfile) takes out the healthy images too and
+      # the tag publishes NOTHING. Observed on oasgen-provider 0.21.0: rest-dynamic-controller could
+      # not push, which cancelled the already-succeeding oasgen-provider build. Independent images
+      # are independent — let each one report its own verdict.
+      fail-fast: false
       matrix:
         include: ${{ fromJSON(inputs.modules) }}
     runs-on: ubuntu-latest
