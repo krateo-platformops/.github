@@ -1,0 +1,123 @@
+# Reusable: assert every image a repo's charts reference actually EXISTS in the registry, at the
+# versions a release would publish. One line in a chart-publishing repo buys the check.
+#
+# Why this is org-level rather than per-repo: the failure it catches is invisible until install, and
+# expensive when it lands. oasgen-provider chart 0.20.0 shipped rdc.image.tag: 0.19.0 — a version never
+# published in that org — so every controller it generated ImagePullBackOff'd, and the reported symptom
+# was an unrelated job hanging with its dependents stuck at Init:0/1, several layers from the cause
+# (krateo-platformops/oasgen-provider#62).
+#
+# Deriving a companion tag from .Chart.AppVersion removes the "someone forgot to bump the pin" half of
+# that, but only where the components release in lockstep. It cannot help a chart whose companions run
+# INDEPENDENT version lines — core-provider pins chart-inspector 1.0.5 and cdc 1.3.15 against appVersion
+# 2.13.0 — and it never covers the other half anywhere: the component simply not being published yet at
+# the version being released. Existence is the check that holds in both shapes.
+#
+# Version resolution mirrors release-oci.yaml exactly, so what is checked is what would ship.
+name: chart-images
+
+on:
+  workflow_call:
+    inputs:
+      chart_version:
+        description: "Version substituted for CHART_VERSION/SOURCE_REF. Default: the git tag, else 0.0.0."
+        type: string
+        default: ""
+      app_version:
+        description: "Version substituted for APP_VERSION. Default: latest semver tag of the app repo (<repo> with any -chart suffix stripped), as release-oci resolves it."
+        type: string
+        default: ""
+      chart_root:
+        description: "Directory to search for Chart.yaml files."
+        type: string
+        default: "."
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  chart-images:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # APP_VERSION may be resolved from tags
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.19.0
+
+      # Public GHCR images need no auth; a private one does. Logging in keeps the check honest for both,
+      # and avoids a missing-image false positive that is really a permissions error.
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify chart-referenced images exist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHART_VERSION_IN: ${{ inputs.chart_version }}
+          APP_VERSION_IN: ${{ inputs.app_version }}
+          CHART_ROOT: ${{ inputs.chart_root }}
+        run: |
+          set -euo pipefail
+
+          CHART_VERSION="${CHART_VERSION_IN:-}"
+          if [ -z "$CHART_VERSION" ]; then
+            case "${GITHUB_REF:-}" in
+              refs/tags/*) CHART_VERSION="${GITHUB_REF_NAME}" ;;
+              *)           CHART_VERSION="0.0.0" ;;
+            esac
+          fi
+
+          APP_VERSION="${APP_VERSION_IN:-}"
+          if [ -z "$APP_VERSION" ]; then
+            APP_REPO="${GITHUB_REPOSITORY%-chart}"
+            APP_VERSION="$(gh api "repos/${APP_REPO}/tags" --paginate --jq '.[].name' 2>/dev/null \
+              | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)"
+          fi
+          if [ -z "$APP_VERSION" ]; then
+            echo "::warning::could not resolve APP_VERSION; charts using the APP_VERSION placeholder are skipped"
+          fi
+          echo "resolved: CHART_VERSION=${CHART_VERSION}  APP_VERSION=${APP_VERSION:-<none>}"
+
+          work="$(mktemp -d)"; failed=0; checked=0
+
+          while IFS= read -r chart; do
+            d="$(dirname "$chart")"
+            # Skip vendored subcharts, matching release-oci's discovery rule.
+            [ "$(basename "$(dirname "$d")")" = "charts" ] && continue
+            name="$(basename "$d")"
+            cp -r "$d" "$work/$name"
+            sed -i "s/CHART_VERSION/${CHART_VERSION}/g; s/SOURCE_REF/${CHART_VERSION}/g" "$work/$name/Chart.yaml"
+            [ -n "$APP_VERSION" ] && sed -i "s/APP_VERSION/${APP_VERSION}/g" "$work/$name/Chart.yaml"
+
+            # Grep the rendered output rather than parsing YAML: images appear both as container `image:`
+            # fields and inside runtime-template ConfigMaps that a provider renders again per resource.
+            while IFS= read -r img; do
+              [ -n "$img" ] || continue
+              checked=$((checked+1))
+              if docker manifest inspect "$img" >/dev/null 2>&1; then
+                echo "  OK      $img"
+              else
+                echo "  MISSING $img   <- referenced by ${name}"
+                echo "::error::chart ${name} references an image that does not exist: ${img}"
+                failed=$((failed+1))
+              fi
+            done < <(helm template verify "$work/$name" 2>/dev/null \
+                      | grep -oE 'image: *"?[A-Za-z0-9._/-]+:[A-Za-z0-9._-]+"?' \
+                      | sed -E 's/^image: *"?//; s/"?$//' | sort -u)
+          done < <(find "${CHART_ROOT}" -name Chart.yaml -not -path '*/.git/*' | sort)
+
+          echo "checked ${checked} image reference(s)"
+          if [ "$failed" -gt 0 ]; then
+            echo "::error::${failed} chart-referenced image(s) do not exist. A release with these values would ImagePullBackOff on every install." >&2
+            exit 1
+          fi
+          echo "OK: every chart-referenced image exists"
