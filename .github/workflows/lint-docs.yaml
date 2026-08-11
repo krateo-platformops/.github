@@ -117,9 +117,17 @@ jobs:
               if ts and latest_tag_date:
                   try:
                       tsd = datetime.datetime.fromisoformat(ts.replace("Z","+00:00"))
-                      if f.parent == DOCS and tsd < latest_tag_date:
+                      # Normalize both sides to tz-aware (assume UTC) so a bare-date timestamp
+                      # (offset-naive) never trips a naive-vs-aware TypeError against the git-tag
+                      # date (offset-aware, from %cI). TypeError is now caught defensively too.
+                      if tsd.tzinfo is None:
+                          tsd = tsd.replace(tzinfo=datetime.timezone.utc)
+                      cmp_tag = latest_tag_date
+                      if cmp_tag.tzinfo is None:
+                          cmp_tag = cmp_tag.replace(tzinfo=datetime.timezone.utc)
+                      if f.parent == DOCS and tsd < cmp_tag:
                           warns.append(f"{rel}: timestamp {ts} predates the latest release tag (review for drift)")
-                  except ValueError:
+                  except (ValueError, TypeError):
                       errors.append(f"{rel}: timestamp not ISO 8601")
 
               # 4. relative links resolve
