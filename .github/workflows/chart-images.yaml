@@ -103,11 +103,22 @@ jobs:
             while IFS= read -r img; do
               [ -n "$img" ] || continue
               checked=$((checked+1))
-              if docker manifest inspect "$img" >/dev/null 2>&1; then
+              # A tag fires this release AND the separate image-build workflow (release-tag)
+              # concurrently — not in sequence — so an image referenced by this chart may not be
+              # pushed yet when we look. Wait for it rather than losing the race: poll for up to
+              # ~30m (a multi-platform build's worst case), then treat a still-missing image as a
+              # genuine error. Images from one build land together, so only the first reference
+              # actually waits; the rest resolve on the first attempt.
+              found=0
+              for _ in $(seq 1 60); do
+                if docker manifest inspect "$img" >/dev/null 2>&1; then found=1; break; fi
+                sleep 30
+              done
+              if [ "$found" = 1 ]; then
                 echo "  OK      $img"
               else
                 echo "  MISSING $img   <- referenced by ${name}"
-                echo "::error::chart ${name} references an image that does not exist: ${img}"
+                echo "::error::chart ${name} references an image that does not exist: ${img} (waited ~30m; the image-build workflow may have failed)"
                 failed=$((failed+1))
               fi
             done < <(helm template verify "$work/$name" 2>/dev/null \
