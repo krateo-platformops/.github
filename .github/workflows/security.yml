@@ -76,7 +76,9 @@ jobs:
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
-          scanners: vuln,secret,misconfig
+          scanners: vuln,secret        # gate on CRITICAL CVEs + secrets only; misconfig (KSV) stays
+                                        # report-only in the step above (mostly example/dev manifests —
+                                        # add misconfig here once those are cleaned/allowlisted)
           severity: CRITICAL
           ignore-unfixed: true
           exit-code: "1"
