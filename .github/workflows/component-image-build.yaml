@@ -99,6 +99,23 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: ${{ inputs.build_args }}
+          # Supply-chain attestations stay ON. A SINGLE buildx call emits the whole manifest list
+          # (both platforms + their provenance/SBOM) as one coherent OCI image index, so the
+          # attestations attach cleanly — the "same arch, two digests" ambiguity only ever came from
+          # the build-by-digest + `imagetools create` merge path (each per-arch build pushed an index
+          # of image + attestation, and merging those indexes duplicated/confused platform entries).
+          # We keep the single build here, so provenance + sbom are safe to keep enabled.
+          provenance: true
+          sbom: true
+          # BuildKit layer cache in GitHub Actions cache, scoped per module (the scope keeps a
+          # monorepo's images from clobbering each other's cache). Without this EVERY build was cold:
+          # a tag build re-ran the whole emulated linux/arm64 `npm ci` + build from scratch (~25 min
+          # observed on frontend). With mode=max the intermediate `npm ci`/deps layers are cached too,
+          # so an unchanged-dependency build reuses them and only rebuilds what actually changed. The
+          # cache is per-arch inside one entry (buildkit keys layers by platform), so it warms both
+          # the amd64 and the emulated arm64 legs.
+          cache-from: type=gha,scope=${{ matrix.mod }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.mod }}
 
       - name: Inspect image (verify multi-arch manifest)
         if: ${{ inputs.push }}
