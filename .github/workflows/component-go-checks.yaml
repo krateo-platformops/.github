@@ -57,11 +57,27 @@ jobs:
       - name: Regenerate CRDs
         working-directory: ${{ inputs.module }}
         run: make generate
-      - name: Fail on stale CRDs
-        working-directory: ${{ inputs.module }}
+      # Diff the WHOLE tree, not just <module>/crds/. Generated CRDs frequently have to exist in more
+      # than one place -- the chart that versions and ships them, an envtest fixture -- and a guard
+      # scoped to the generator's own output directory passes while those copies rot. The copy users
+      # install is usually the one furthest from the generator, so it is the one most likely to be
+      # missed and the most damaging when it is.
+      #
+      # Observed in oasgen-provider: `make generate` updated crds/ alone while the shipped CRD chart
+      # kept a stale enum, with this guard green. Had it merged, the fix would have reached every file
+      # except the one users install (krateo-platformops/oasgen-provider#84).
+      #
+      # This deliberately does not take a list of extra paths. A path list is itself a copy that falls
+      # behind when a destination is added; diffing the tree covers whatever `make generate` writes, by
+      # construction, in every repo that calls this.
+      #
+      # go.mod/go.sum are excluded because `make generate` runs `go mod tidy` in most repos, and that
+      # churn is not CRD drift -- failing on it would be noise and would push repos to stop calling
+      # this guard.
+      - name: Fail on stale generated artifacts
         run: |
-          if ! git diff --exit-code crds/; then
-            echo "::error::Committed CRDs in crds/ are stale. Run 'make generate' and commit the result." >&2
+          if ! git diff --exit-code -- . ':(exclude)**/go.mod' ':(exclude)**/go.sum'; then
+            echo "::error::Generated artifacts are stale. Run 'make generate' in ${{ inputs.module }} and commit the result, including any copies it syncs (chart templates, test fixtures)." >&2
             exit 1
           fi
-          echo "CRDs are up to date."
+          echo "Generated artifacts are up to date."
