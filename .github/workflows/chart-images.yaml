@@ -105,12 +105,25 @@ jobs:
               checked=$((checked+1))
               # A tag fires this release AND the separate image-build workflow (release-tag)
               # concurrently — not in sequence — so an image referenced by this chart may not be
-              # pushed yet when we look. Wait for it rather than losing the race: poll for up to
-              # ~30m (a multi-platform build's worst case), then treat a still-missing image as a
-              # genuine error. Images from one build land together, so only the first reference
-              # actually waits; the rest resolve on the first attempt.
+              # pushed yet when we look. Wait for it rather than losing the race, then treat a
+              # still-missing image as a genuine error. Images from one build land together, so only
+              # the first reference actually waits; the rest resolve on the first attempt.
+              #
+              # The budget must cover the WHOLE of the other workflow, not just its build step. It was
+              # ~30m, sized on "a multi-platform build's worst case", which held while the build began
+              # immediately. It no longer does: a release-tag that gates its build on the test suite
+              # (`build: needs: [test]`) does not start building until the suite passes, so the budget
+              # has to absorb test time + build time.
+              #
+              # Observed on oasgen-provider 0.22.1, the first release after that gate was added: tests
+              # 17:00:26->17:11:48, build 17:11:51->~17:50, and this check gave up at 17:38 — about 12
+              # minutes early, failing a release whose images were fine. ~60m covers a 20m suite (the
+              # -timeout most repos set) plus a 30m worst-case build, with headroom.
+              #
+              # Only the FIRST missing reference pays this, so the cost of the larger budget is bounded
+              # and only incurred on a genuine stall.
               found=0
-              for _ in $(seq 1 60); do
+              for _ in $(seq 1 120); do
                 if docker manifest inspect "$img" >/dev/null 2>&1; then found=1; break; fi
                 sleep 30
               done
@@ -118,7 +131,7 @@ jobs:
                 echo "  OK      $img"
               else
                 echo "  MISSING $img   <- referenced by ${name}"
-                echo "::error::chart ${name} references an image that does not exist: ${img} (waited ~30m; the image-build workflow may have failed)"
+                echo "::error::chart ${name} references an image that does not exist: ${img} (waited ~60m; the image-build workflow may have failed, or is still gated behind its test suite)"
                 failed=$((failed+1))
               fi
             done < <(helm template verify "$work/$name" 2>/dev/null \
