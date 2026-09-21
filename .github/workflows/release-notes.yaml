@@ -1,6 +1,6 @@
 # Reusable: THE canonical Krateo release-notes generator — writes the notes for a tag and fans them
-# out to every sink we publish to: the GitHub Release body, the aggregated feed (which also holds each
-# repo's accumulated changelog), and Slack. Same contract as release-oci: a caller supplies only its triggers,
+# out to every sink we publish to: the GitHub Release body, this org's release feed (which also holds
+# each repo's accumulated changelog), and Slack. Same contract as release-oci: a caller supplies only its triggers,
 # so "identical across every repo" is enforced by construction instead of by discipline.
 #
 # WHY A TOP-LEVEL CALLER AND NOT A JOB INSIDE release-oci. Nesting is the obvious move and it does not
@@ -63,7 +63,7 @@ on:
           RETIRED, kept so existing callers do not break. The per-repo CHANGELOG.md commit it used to
           control is gone: default branches carry rulesets requiring a pull request, and a bot pushing
           to main is what that rule exists to prevent. The changelog now accumulates in the feed repo
-          under notes/<org>/<repo>.md, which the `aggregate` sink writes. This input has no effect.
+          under notes/<repo>.md, which the `aggregate` sink writes. This input has no effect.
         type: boolean
         default: true
       slack:
@@ -71,13 +71,16 @@ on:
         type: boolean
         default: true
       aggregate:
-        description: "Send to the cross-org feed. No-op unless RELEASE_FEED_TOKEN is set."
+        description: "Send to this org's release feed. No-op unless RELEASE_FEED_TOKEN is set."
         type: boolean
         default: true
       feed_repo:
-        description: "Repo collecting the cross-org feed."
+        description: >-
+          Override the feed repository. Left empty it resolves to <this repo's org>/release-feed, so a
+          repo in any of the three orgs reaches its OWN feed with no per-repo configuration and no
+          list to keep in step. Set it only for a repo that must file somewhere else.
         type: string
-        default: "krateo-platformops/release-feed"
+        default: ""
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN:
         description: >-
@@ -93,9 +96,12 @@ on:
         required: false
       RELEASE_FEED_TOKEN:
         description: >-
-          The ONLY cross-repo credential here, and deliberately narrow: GITHUB_TOKEN cannot dispatch to
-          a different repository, so the feed needs its own. Scope it to contents:write on the feed
-          repo alone — it never needs access to the repo being released.
+          The only cross-REPO credential here, and never cross-ORG: each org's feed lives in that same
+          org, so this token grants write within one org and nothing reaches across. A fine-grained PAT,
+          repository access limited to that org's release-feed, permission Contents: Read and write —
+          which is exactly what POST /repos/{owner}/{repo}/dispatches requires and no more. It never
+          needs access to the repo being released. A classic PAT would grant `repo` scope over every
+          repository the account can reach, for a credential whose whole job is appending markdown.
         required: false
 
 permissions:
@@ -337,12 +343,17 @@ jobs:
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.RELEASE_FEED_TOKEN }}
-          FEED: ${{ inputs.feed_repo }}
+          FEED_IN: ${{ inputs.feed_repo }}
           TAG: ${{ steps.gate.outputs.tag }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+          # Resolve to THIS org's feed unless a caller overrode it. Deriving rather than listing means
+          # a new org needs no change here, and a repo can never be wired to another org's feed by a
+          # stale default — which is what a single hardcoded feed repo would have done to two orgs.
+          FEED="${FEED_IN:-$GITHUB_REPOSITORY_OWNER/release-feed}"
           jq -n --arg repo "$REPO" --arg tag "$TAG" --rawfile notes .release-notes/notes.md \
             '{event_type:"release-note", client_payload:{repo:$repo, tag:$tag, notes:$notes}}' \
             > "$RUNNER_TEMP/dispatch.json"
+          echo "filing to $FEED"
           gh api "repos/$FEED/dispatches" --input "$RUNNER_TEMP/dispatch.json"
