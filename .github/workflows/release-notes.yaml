@@ -100,6 +100,14 @@ permissions:
 jobs:
   notes:
     runs-on: ubuntu-latest
+    # `secrets` IS NOT A VALID CONTEXT IN A STEP-LEVEL `if:` — only `env` is, along with github/needs/
+    # steps/inputs/job/runner. Lifting the two optional credentials to job-level env here is what lets
+    # the sinks below stay conditional on whether they are configured. Worth recording because nothing
+    # local catches it: the file parses as YAML and every run block parses as bash; GitHub rejects it
+    # only when the workflow is dispatched, with "Unrecognized named-value: 'secrets'".
+    env:
+      SLACK_HOOK: ${{ secrets.SLACK_RELEASE_WEBHOOK }}
+      FEED_TOKEN: ${{ secrets.RELEASE_FEED_TOKEN }}
     # Serialised per repo AND tag, never cancelled: cancel-in-progress could abandon a half-written
     # CHANGELOG commit between `git commit` and `git push`.
     concurrency:
@@ -295,7 +303,7 @@ jobs:
           echo "::warning::could not push the CHANGELOG for $TAG after 3 attempts"
 
       - name: Post to Slack
-        if: steps.result.outputs.ok == 'true' && inputs.slack && secrets.SLACK_RELEASE_WEBHOOK != ''
+        if: steps.result.outputs.ok == 'true' && inputs.slack && env.SLACK_HOOK != ''
         continue-on-error: true
         env:
           HOOK: ${{ secrets.SLACK_RELEASE_WEBHOOK }}
@@ -314,7 +322,7 @@ jobs:
             | curl -sS -X POST -H 'content-type: application/json' --data-binary @- "$HOOK" >/dev/null
 
       - name: Send to the cross-org feed
-        if: steps.result.outputs.ok == 'true' && inputs.aggregate && secrets.RELEASE_FEED_TOKEN != ''
+        if: steps.result.outputs.ok == 'true' && inputs.aggregate && env.FEED_TOKEN != ''
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.RELEASE_FEED_TOKEN }}
