@@ -100,7 +100,8 @@ on:
 
 permissions:
   contents: write # the release body; granted by the top-level shim. No commit is made to this repo.
-  id-token: write # claude-code-action's default GitHub App authentication
+  id-token: write # vestigial: claude-code-action needed it. Harmless, and left in place
+                  # because removing it would mean editing the shim in every caller repo.
 
 jobs:
   notes:
@@ -155,8 +156,16 @@ jobs:
         run: |
           set -euo pipefail
           MARKER="<!-- krateo-release-notes -->"
+          # The sentence the fallback writes. A body carrying it is OURS and is not notes — it is the
+          # record of a generation that failed, so a re-run must be allowed to replace it. Without
+          # this the claim makes every failure permanent: the marker is present, the re-run exits,
+          # and the release keeps a commit list forever. Distilled notes are still never regenerated.
+          FALLBACK="Generated notes are unavailable for this release."
           if EXISTING=$(gh release view "$TAG" --json body -q .body 2>/dev/null); then
             case "$EXISTING" in
+              *"$MARKER"*"$FALLBACK"*)
+                echo "::notice::$TAG carries our FALLBACK body — reclaiming so this run can replace it"
+                echo "claimed=true" >> "$GITHUB_OUTPUT"; exit 0 ;;
               *"$MARKER"*)
                 echo "notes already present for $TAG — an earlier run or a parallel caller did this"
                 echo "claimed=false" >> "$GITHUB_OUTPUT"; exit 0 ;;
@@ -201,19 +210,30 @@ jobs:
       # Read and Write ONLY, and no Bash: see the header. The log is read from a file rather than
       # interpolated into the prompt, so a commit body cannot break out of a quoting context, and an
       # instruction hidden in one has no shell to reach for.
+      # THE CLI, NOT claude-code-action, AND THIS IS THE WHOLE REASON THIS FILE EXISTS IN THIS SHAPE.
+      #
+      # `anthropics/claude-code-action@v1` refuses to start on a `push` event — it answers
+      # "Unsupported event type: push" and exits 1 before the model is reached. Every release-oci shim
+      # in all three orgs triggers on a tag push, so that action could never run here, and the job took
+      # the fallback path on every tag since this workflow was introduced: a release body of commit
+      # subjects, a green tick, and a warning blaming an expired token. Nothing was wrong with the
+      # token. Verified on krateo-platformops/frontend 1.6.33 and reproduced by dispatching the same
+      # workflow by hand.
+      #
+      # The CLI has no event-type opinion. Everything the security header promises is preserved and is
+      # now expressed directly: Read and Write ONLY, never Bash, so an instruction hidden in a commit
+      # body has no shell to reach for; the log is still handed over as a FILE rather than interpolated
+      # into the prompt; and the prompt itself is passed through the environment, so it is never
+      # subject to shell word-splitting either.
       - name: Generate
         if: steps.claim.outputs.claimed == 'true'
         id: gen
         continue-on-error: true # an expired token must not fail the release
-        uses: anthropics/claude-code-action@v1
-        with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          claude_args: |
-            --model ${{ inputs.model }}
-            --max-turns 6
-            --allowedTools "Read,Write"
-          prompt: |
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          MODEL: ${{ inputs.model }}
+          PROMPT: |
             Write the release notes for tag ${{ steps.gate.outputs.tag }} of
             ${{ github.repository }} (previous tag: ${{ steps.collect.outputs.prev || 'none, first release' }}).
 
@@ -240,6 +260,22 @@ jobs:
             - Plain GitHub Markdown, headings no deeper than ###. No preamble, no sign-off, no emoji
               headers, no "In this release we are excited to". Start with content.
             - Under 400 words unless the change genuinely warrants more.
+        run: |
+          set -euo pipefail
+          npm install -g @anthropic-ai/claude-code@latest >/dev/null
+          # Read,Write and nothing else — the invariant the header promises, stated to the runtime
+          # rather than to a wrapper. Bash is named in the denylist too so the guarantee survives a
+          # future change to how the allowlist is interpreted.
+          if ! claude -p "$PROMPT" \
+              --model "$MODEL" \
+              --max-turns 6 \
+              --allowedTools "Read,Write" \
+              --disallowedTools "Bash,WebFetch,WebSearch" \
+              --permission-mode acceptEdits > "$RUNNER_TEMP/gen.log" 2>&1; then
+            echo "::warning::the generator exited non-zero; last lines follow"
+            tail -30 "$RUNNER_TEMP/gen.log" || true
+            exit 1
+          fi
 
       - name: Check the result and fall back honestly
         if: steps.claim.outputs.claimed == 'true'
@@ -257,7 +293,7 @@ jobs:
           fi
           # No notes. The likeliest cause by far is an expired subscription token, so say that rather
           # than leaving someone to read action logs. A release must never keep the placeholder.
-          echo "::warning title=Release notes not generated::Generation for $TAG did not produce notes (step outcome: $GEN). If this repeats across repos the CLAUDE_CODE_OAUTH_TOKEN has most likely expired — regenerate it with 'claude setup-token' and update the org secret. The release itself is unaffected."
+          echo "::warning title=Release notes not generated::Generation for $TAG did not produce notes (step outcome: $GEN). Read the Generate step's log before assuming a cause: an expired CLAUDE_CODE_OAUTH_TOKEN is one possibility (regenerate with 'claude setup-token' and update the org secret), but so is a model error or a malformed range. The release itself is unaffected, and a re-run of this workflow will now replace this fallback body."
           { echo "Generated notes are unavailable for this release. Commits in this tag:"; echo;
             cat .release-notes/subjects.txt; } > .release-notes/notes.md
           echo "ok=fallback" >> "$GITHUB_OUTPUT"
