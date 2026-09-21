@@ -1,0 +1,7 @@
+{
+  "name": "Krateo release notes",
+  "description": "Generates release notes from the commit log on a release tag and publishes them to the GitHub Release, CHANGELOG.md, Slack and the cross-org feed. Calls the org-wide reusable workflow.",
+  "iconName": "octicon tag",
+  "categories": ["Automation", "Utilities"],
+  "filePatterns": ["Chart.yaml$", "go.mod$", "package.json$"]
+}
