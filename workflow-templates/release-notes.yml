@@ -8,8 +8,8 @@
 # down a nested call either, so ANTHROPIC_API_KEY would not arrive. Triggering at the top level gives
 # both natively — which is why this needs no PAT.
 #
-# Notes never fail a release: every sink in the reusable is independently guarded, and a missing
-# ANTHROPIC_API_KEY skips the job with a warning rather than a red tick.
+# Notes never fail a release: every sink in the reusable is independently guarded, and a missing or
+# expired credential skips the job with a warning rather than a red tick.
 name: release-notes
 
 on:
@@ -26,6 +26,6 @@ jobs:
     uses: krateo-platformops/.github/.github/workflows/release-notes.yaml@main
     permissions:
       contents: write # the release body and the CHANGELOG commit
-    secrets: inherit  # ANTHROPIC_API_KEY, and the optional Slack/feed credentials
+    secrets: inherit  # CLAUDE_CODE_OAUTH_TOKEN, and the optional Slack/feed credentials
     with:
       tag: ${{ github.event.inputs.tag || '' }}
