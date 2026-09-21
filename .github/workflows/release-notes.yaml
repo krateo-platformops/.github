@@ -277,15 +277,22 @@ jobs:
         continue-on-error: true # a protected default branch must not redden a release
         env:
           TAG: ${{ steps.gate.outputs.tag }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           BRANCH=$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##' || echo main)
           git config user.name  "krateo-release-notes[bot]"
           git config user.email "noreply@krateo.io"
+          # PUSH THROUGH AN EXPLICITLY AUTHENTICATED URL rather than the credentials actions/checkout
+          # persisted. claude-code-action reconfigures git auth for its own commits during the Generate
+          # step above, which leaves the persisted credential unusable by the time we get here:
+          #   remote: Invalid username or token. Password authentication is not supported.
+          # Carrying the token on the remote makes this step independent of whatever ran before it.
+          REMOTE="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           cp .release-notes/notes.md "$RUNNER_TEMP/notes.md" # survives the branch checkout below
           for attempt in 1 2 3; do
-            git fetch origin "$BRANCH" --quiet
-            git checkout -q -B "$BRANCH" "origin/$BRANCH"
+            git fetch "$REMOTE" "$BRANCH" --quiet
+            git checkout -q -B "$BRANCH" FETCH_HEAD
             # Idempotent: a re-run must not append a second section for the same tag.
             if [ -f CHANGELOG.md ] && grep -qF "## $TAG " CHANGELOG.md; then
               echo "CHANGELOG already carries $TAG"; exit 0
@@ -296,11 +303,20 @@ jobs:
             git add CHANGELOG.md # exactly one path: nothing the agent could have written is staged
             git commit -q -m "docs(changelog): $TAG" \
                           -m "Generated from the commit log by the org-wide release-notes workflow."
-            if git push origin "$BRANCH"; then exit 0; fi
-            echo "push rejected (attempt $attempt) — another tag landed first; rebasing onto it"
-            git reset --hard "origin/$BRANCH"
+            # DO NOT GUESS WHY A PUSH FAILED. The previous version announced "another tag landed
+            # first" for every failure, including an auth error, and retried a rebase that could never
+            # help — a message that asserted a cause it had not checked. Only a non-fast-forward is
+            # worth retrying; anything else is reported as it actually happened, once.
+            if git push "$REMOTE" "HEAD:$BRANCH" 2>"$RUNNER_TEMP/push.err"; then exit 0; fi
+            ERR=$(sed -E 's#x-access-token:[^@]*@#x-access-token:***@#g' "$RUNNER_TEMP/push.err")
+            if printf '%s' "$ERR" | grep -qiE 'non-fast-forward|fetch first|behind its remote'; then
+              echo "push lost a race (attempt $attempt) — rebasing onto what landed and retrying"
+              continue
+            fi
+            echo "::warning title=CHANGELOG not updated::Pushing the CHANGELOG for $TAG failed and this is not a race, so retrying cannot help. The release body is unaffected. git said: ${ERR}"
+            exit 0
           done
-          echo "::warning::could not push the CHANGELOG for $TAG after 3 attempts"
+          echo "::warning::could not push the CHANGELOG for $TAG after 3 attempts — all races"
 
       - name: Post to Slack
         if: steps.result.outputs.ok == 'true' && inputs.slack && env.SLACK_HOOK != ''
