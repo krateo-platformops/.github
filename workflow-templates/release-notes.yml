@@ -26,6 +26,7 @@ jobs:
     uses: krateo-platformops/.github/.github/workflows/release-notes.yaml@main
     permissions:
       contents: write # the release body and the CHANGELOG commit
+      id-token: write # claude-code-action's GitHub App auth; the reusable cannot grant itself this
     secrets: inherit  # CLAUDE_CODE_OAUTH_TOKEN, and the optional Slack/feed credentials
     with:
       tag: ${{ github.event.inputs.tag || '' }}
