@@ -1,0 +1,35 @@
+name: Bug report
+description: Something behaves differently from what it should
+labels: [bug]
+body:
+  - type: textarea
+    id: observed
+    attributes:
+      label: What happened
+      description: The behaviour you observed, and what you expected instead. Exact error text if it is short.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: The minimal steps or shape that produces it.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: >-
+        Name the FIELD you read, not just the verdict — "status.conditions Ready=False, reason X"
+        rather than "it is broken". Include versions, the cluster if relevant, and timestamps.
+        If a value looked stale, say when it last changed.
+    validations:
+      required: false
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Chart version, image tag, or installer version. Say where you read it.
+    validations:
+      required: false
