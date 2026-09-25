@@ -11,6 +11,19 @@
 #   • multi-chart repos:   charts/*            (each immediate child is first-class)
 #   • vendored deps:       chart/charts/<dep>  (SKIPPED — grandparent is itself a chart)
 #
+# What it never publishes: a Chart.yaml under a directory named examples, example, __fixtures__,
+# fixtures, testdata, test, tests, docs or node_modules. Those hold charts that exist to be READ — a
+# test fixture, a documented example — and every one of them used to be packaged at the release
+# version and pushed to the org registry. On frontend 1.6.57 a fixture named `builder-publish` (a real
+# package owned by another repo) was refused with a 403, and the job died before pushing the repo's
+# own charts: the tag shipped its image and none of its charts. chart-images.yaml skips the same set,
+# so the image gate and the publish always agree on which charts exist. A repo can narrow discovery
+# further with `chart_root` (e.g. `helm`).
+#
+# A failed push no longer stops the others: every chart is pushed, and the job fails at the end
+# naming each chart that did not publish. Packaging still fails fast — nothing is pushed if any
+# chart does not package, so a broken chart can never ship half a release.
+#
 # How versions are set (a chart opts in purely by which placeholders it authors):
 #   • CHART_VERSION → the release tag (or workflow_dispatch input)
 #   • SOURCE_REF    → the release tag           (federated agents pin their source to it)
@@ -40,6 +53,10 @@ on:
         description: "Target OCI repo. Must carry a chart-namespace path segment (see the collision guard)."
         type: string
         default: "oci://ghcr.io/krateo-platformops/charts"
+      chart_root:
+        description: "Directory to search for Chart.yaml files (e.g. `helm`). Default: the whole repo, minus examples/fixtures/test/docs directories."
+        type: string
+        default: "."
 
 permissions:
   contents: read
@@ -57,6 +74,7 @@ jobs:
     with:
       chart_version: ${{ inputs.chart_version }}
       app_version: ${{ inputs.app_version }}
+      chart_root: ${{ inputs.chart_root }}
 
   package-and-push:
     needs: [verify-images]
@@ -137,12 +155,14 @@ jobs:
         env:
           CHART_VERSION: ${{ steps.ver.outputs.chart_version }}
           APP_VERSION: ${{ steps.ver.outputs.app_version }}
+          CHART_ROOT: ${{ inputs.chart_root }}
         run: |
           set -euo pipefail
 
           # Discover first-class charts: a Chart.yaml is a vendored subchart (SKIP) iff its
-          # parent dir is named `charts` AND its grandparent is itself a chart. Everything
-          # else is first-class and gets published.
+          # parent dir is named `charts` AND its grandparent is itself a chart. Directories that
+          # hold charts to be read, not released (examples, fixtures, test data, docs) are pruned
+          # — keep this list identical to chart-images.yaml's. Everything else is published.
           charts=()
           while IFS= read -r cf; do
             d="$(dirname "$cf")"
@@ -151,7 +171,7 @@ jobs:
               continue
             fi
             charts+=("$d")
-          done < <(find . -name Chart.yaml | sort)
+          done < <(find "${CHART_ROOT:-.}" \( -name .git -o -name node_modules -o -name examples -o -name example -o -name __fixtures__ -o -name fixtures -o -name testdata -o -name test -o -name tests -o -name docs \) -prune -o -name Chart.yaml -print | sort)
 
           if [ "${#charts[@]}" -eq 0 ]; then
             echo "::error::no first-class charts found"; exit 1
@@ -167,13 +187,27 @@ jobs:
               sed -i "s/APP_VERSION/${APP_VERSION}/g" "${d}/Chart.yaml"
             fi
             if grep -q '^dependencies:' "${d}/Chart.yaml"; then
-              helm dependency build "${d}" >/dev/null 2>&1 || helm dependency update "${d}" >/dev/null 2>&1 || true
+              # Still non-fatal (a chart with vendored deps packages without a build), but no longer
+              # silent: a dependency that cannot be resolved is named here, not left for helm package
+              # to report as something else.
+              helm dependency build "${d}" >/dev/null 2>&1 || helm dependency update "${d}" >/dev/null 2>&1 \
+                || echo "::warning::${d}: helm dependency build/update failed — packaging with what is vendored"
             fi
             helm package "${d}" -d dist/
             echo "::endgroup::"
           done
 
+          # Push EVERY package, then fail naming each one that did not publish. Stopping at the first
+          # failure (alphabetical order) let one refused chart leave the rest unpublished.
+          failed=()
           for tgz in dist/*.tgz; do
             echo "Pushing ${tgz} -> ${OCI_REPO}"
-            helm push "${tgz}" "${OCI_REPO}"
+            if ! helm push "${tgz}" "${OCI_REPO}"; then
+              echo "::error::push failed: ${tgz}"
+              failed+=("$(basename "${tgz}")")
+            fi
           done
+          if [ "${#failed[@]}" -gt 0 ]; then
+            echo "::error::${#failed[@]} chart(s) did not publish: ${failed[*]} — the others were pushed."
+            exit 1
+          fi

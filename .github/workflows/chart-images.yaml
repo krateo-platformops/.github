@@ -137,7 +137,8 @@ jobs:
             done < <(helm template verify "$work/$name" 2>/dev/null \
                       | grep -oE 'image: *"?[A-Za-z0-9._/-]+:[A-Za-z0-9._-]+"?' \
                       | sed -E 's/^image: *"?//; s/"?$//' | sort -u)
-          done < <(find "${CHART_ROOT}" -name Chart.yaml -not -path '*/.git/*' | sort)
+          # Same pruned set as release-oci.yaml's discovery — the gate checks exactly what would publish.
+          done < <(find "${CHART_ROOT:-.}" \( -name .git -o -name node_modules -o -name examples -o -name example -o -name __fixtures__ -o -name fixtures -o -name testdata -o -name test -o -name tests -o -name docs \) -prune -o -name Chart.yaml -print | sort)
 
           echo "checked ${checked} image reference(s)"
           if [ "$failed" -gt 0 ]; then
