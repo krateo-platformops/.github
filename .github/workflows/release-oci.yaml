@@ -16,13 +16,15 @@
 # test fixture, a documented example — and every one of them used to be packaged at the release
 # version and pushed to the org registry. On frontend 1.6.57 a fixture named `builder-publish` (a real
 # package owned by another repo) was refused with a 403, and the job died before pushing the repo's
-# own charts: the tag shipped its image and none of its charts. chart-images.yaml skips the same set,
-# so the image gate and the publish always agree on which charts exist. A repo can narrow discovery
-# further with `chart_root` (e.g. `helm`).
+# own charts: the tag shipped its image and none of its charts. chart-images.yaml discovers with the
+# same prune list and the same vendored-subchart rule, so the image gate checks the charts this
+# publishes. A repo can narrow discovery further with `chart_root` (e.g. `helm`); the root itself is
+# never pruned, only what is below it.
 #
-# A failed push no longer stops the others: every chart is pushed, and the job fails at the end
-# naming each chart that did not publish. Packaging still fails fast — nothing is pushed if any
-# chart does not package, so a broken chart can never ship half a release.
+# A failed push no longer stops the others. App charts are pushed first; a `<x>-crds` chart is pushed
+# only if its `<x>` chart published in the same run (or the repo has no `<x>`), so a failure never
+# leaves CRDs at a version whose app chart does not exist. The job then fails naming what failed and
+# what was held back. Packaging still fails fast — nothing is pushed if any chart does not package.
 #
 # How versions are set (a chart opts in purely by which placeholders it authors):
 #   • CHART_VERSION → the release tag (or workflow_dispatch input)
@@ -158,6 +160,9 @@ jobs:
           CHART_ROOT: ${{ inputs.chart_root }}
         run: |
           set -euo pipefail
+          if [ ! -d "${CHART_ROOT:-.}" ]; then
+            echo "::error::chart_root '${CHART_ROOT}' is not a directory"; exit 1
+          fi
 
           # Discover first-class charts: a Chart.yaml is a vendored subchart (SKIP) iff its
           # parent dir is named `charts` AND its grandparent is itself a chart. Directories that
@@ -171,7 +176,7 @@ jobs:
               continue
             fi
             charts+=("$d")
-          done < <(find "${CHART_ROOT:-.}" \( -name .git -o -name node_modules -o -name examples -o -name example -o -name __fixtures__ -o -name fixtures -o -name testdata -o -name test -o -name tests -o -name docs \) -prune -o -name Chart.yaml -print | sort)
+          done < <(find "${CHART_ROOT:-.}" -mindepth 1 \( -name .git -o -name node_modules -o -name examples -o -name example -o -name __fixtures__ -o -name fixtures -o -name testdata -o -name test -o -name tests -o -name docs \) -prune -o -name Chart.yaml -print | sort)
 
           if [ "${#charts[@]}" -eq 0 ]; then
             echo "::error::no first-class charts found"; exit 1
@@ -179,6 +184,7 @@ jobs:
           echo "First-class charts: ${charts[*]}"
 
           mkdir -p dist
+          declare -A tgz_of=()
           for d in "${charts[@]}"; do
             echo "::group::package ${d}"
             # Opt-in placeholder substitution (untouched if a placeholder is absent).
@@ -193,21 +199,41 @@ jobs:
               helm dependency build "${d}" >/dev/null 2>&1 || helm dependency update "${d}" >/dev/null 2>&1 \
                 || echo "::warning::${d}: helm dependency build/update failed — packaging with what is vendored"
             fi
-            helm package "${d}" -d dist/
+            out="$(helm package "${d}" -d dist/)"
+            echo "${out}"
+            tgz_of["${d}"]="${out##*: }"
             echo "::endgroup::"
           done
 
-          # Push EVERY package, then fail naming each one that did not publish. Stopping at the first
-          # failure (alphabetical order) let one refused chart leave the rest unpublished.
-          failed=()
-          for tgz in dist/*.tgz; do
+          # Push every chart, app charts first, and fail at the end naming what did not publish. Stopping
+          # at the first failure (alphabetical order) let one refused chart leave the rest unpublished;
+          # pushing blindly would instead let `<x>-crds` publish at a version whose `<x>` never did.
+          declare -A ok_of=()
+          failed=(); held=()
+          push_chart() {
+            local d="$1" tgz="${tgz_of[$1]}"
             echo "Pushing ${tgz} -> ${OCI_REPO}"
-            if ! helm push "${tgz}" "${OCI_REPO}"; then
+            if helm push "${tgz}" "${OCI_REPO}"; then
+              ok_of["${d}"]=1
+            else
               echo "::error::push failed: ${tgz}"
               failed+=("$(basename "${tgz}")")
             fi
+          }
+          for d in "${charts[@]}"; do
+            case "${d}" in *-crds) ;; *) push_chart "${d}" ;; esac
           done
-          if [ "${#failed[@]}" -gt 0 ]; then
-            echo "::error::${#failed[@]} chart(s) did not publish: ${failed[*]} — the others were pushed."
+          for d in "${charts[@]}"; do
+            case "${d}" in *-crds) ;; *) continue ;; esac
+            app="${d%-crds}"
+            if [ -n "${tgz_of[${app}]:-}" ] && [ -z "${ok_of[${app}]:-}" ]; then
+              echo "::error::holding back $(basename "${tgz_of[${d}]}"): ${app} did not publish at this version"
+              held+=("$(basename "${tgz_of[${d}]}")")
+              continue
+            fi
+            push_chart "${d}"
+          done
+          if [ "${#failed[@]}" -gt 0 ] || [ "${#held[@]}" -gt 0 ]; then
+            echo "::error::published ${#ok_of[@]} of ${#charts[@]} chart(s); failed: ${failed[*]:-none}; held back: ${held[*]:-none}"
             exit 1
           fi

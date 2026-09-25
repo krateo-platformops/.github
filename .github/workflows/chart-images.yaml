@@ -87,16 +87,35 @@ jobs:
           fi
           echo "resolved: CHART_VERSION=${CHART_VERSION}  APP_VERSION=${APP_VERSION:-<none>}"
 
+          if [ ! -d "${CHART_ROOT:-.}" ]; then
+            echo "::error::chart_root '${CHART_ROOT}' is not a directory"; exit 1
+          fi
+
           work="$(mktemp -d)"; failed=0; checked=0
 
           while IFS= read -r chart; do
             d="$(dirname "$chart")"
-            # Skip vendored subcharts, matching release-oci's discovery rule.
-            [ "$(basename "$(dirname "$d")")" = "charts" ] && continue
+            # Skip vendored subcharts with EXACTLY release-oci's rule: a chart under `charts/` is
+            # vendored only if the directory above `charts/` is itself a chart. The looser rule this
+            # replaced skipped every multi-chart `charts/*` repo whole — published, never gated.
+            p="$(dirname "$d")"
+            if [ "$(basename "$p")" = "charts" ] && [ -f "$(dirname "$p")/Chart.yaml" ]; then
+              continue
+            fi
             name="$(basename "$d")"
             cp -r "$d" "$work/$name"
             sed -i "s/CHART_VERSION/${CHART_VERSION}/g; s/SOURCE_REF/${CHART_VERSION}/g" "$work/$name/Chart.yaml"
             [ -n "$APP_VERSION" ] && sed -i "s/APP_VERSION/${APP_VERSION}/g" "$work/$name/Chart.yaml"
+            # Build dependencies as release-oci does: a chart whose dependencies are not vendored fails
+            # to render, and a chart that does not render has no images to check.
+            if grep -q '^dependencies:' "$work/$name/Chart.yaml"; then
+              helm dependency build "$work/$name" >/dev/null 2>&1 || helm dependency update "$work/$name" >/dev/null 2>&1 \
+                || echo "::warning::${name}: helm dependency build/update failed"
+            fi
+            rendered="$work/$name.rendered.yaml"
+            if ! helm template verify "$work/$name" > "$rendered" 2> "$work/$name.err"; then
+              echo "::warning::${name} did not render, so its images were NOT checked: $(head -c 300 "$work/$name.err")"
+            fi
 
             # Grep the rendered output rather than parsing YAML: images appear both as container `image:`
             # fields and inside runtime-template ConfigMaps that a provider renders again per resource.
@@ -134,11 +153,10 @@ jobs:
                 echo "::error::chart ${name} references an image that does not exist: ${img} (waited ~60m; the image-build workflow may have failed, or is still gated behind its test suite)"
                 failed=$((failed+1))
               fi
-            done < <(helm template verify "$work/$name" 2>/dev/null \
-                      | grep -oE 'image: *"?[A-Za-z0-9._/-]+:[A-Za-z0-9._-]+"?' \
+            done < <(grep -oE 'image: *"?[A-Za-z0-9._/-]+:[A-Za-z0-9._-]+"?' "$rendered" \
                       | sed -E 's/^image: *"?//; s/"?$//' | sort -u)
-          # Same pruned set as release-oci.yaml's discovery — the gate checks exactly what would publish.
-          done < <(find "${CHART_ROOT:-.}" \( -name .git -o -name node_modules -o -name examples -o -name example -o -name __fixtures__ -o -name fixtures -o -name testdata -o -name test -o -name tests -o -name docs \) -prune -o -name Chart.yaml -print | sort)
+          # Same prune list and vendored rule as release-oci.yaml's discovery; the root is never pruned.
+          done < <(find "${CHART_ROOT:-.}" -mindepth 1 \( -name .git -o -name node_modules -o -name examples -o -name example -o -name __fixtures__ -o -name fixtures -o -name testdata -o -name test -o -name tests -o -name docs \) -prune -o -name Chart.yaml -print | sort)
 
           echo "checked ${checked} image reference(s)"
           if [ "$failed" -gt 0 ]; then
