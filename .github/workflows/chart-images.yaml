@@ -91,7 +91,7 @@ jobs:
             echo "::error::chart_root '${CHART_ROOT}' is not a directory"; exit 1
           fi
 
-          work="$(mktemp -d)"; failed=0; checked=0
+          work="$(mktemp -d)"; failed=0; checked=0; unrenderable=0; charts=0
 
           while IFS= read -r chart; do
             d="$(dirname "$chart")"
@@ -112,9 +112,31 @@ jobs:
               helm dependency build "$work/$name" >/dev/null 2>&1 || helm dependency update "$work/$name" >/dev/null 2>&1 \
                 || echo "::warning::${name}: helm dependency build/update failed"
             fi
+            charts=$((charts+1))
             rendered="$work/$name.rendered.yaml"
-            if ! helm template verify "$work/$name" > "$rendered" 2> "$work/$name.err"; then
-              echo "::warning::${name} did not render, so its images were NOT checked: $(head -c 300 "$work/$name.err")"
+
+            # Render at the chart's OWN declared floor. `helm template` with no --kube-version renders
+            # against the version helm was compiled for -- v1.34.0 on helm 3.19.0, which setup-helm
+            # pins -- so ANY chart declaring `kubeVersion: ">=1.35..."` or higher cannot render here
+            # and its images go unchecked. Templating at the declared minimum also asserts the chart
+            # renders on the oldest cluster it claims to support. No floor declared: helm's default,
+            # exactly as before.
+            kv=$(grep -m1 '^kubeVersion:' "$work/$name/Chart.yaml" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+            if [ -n "$kv" ]; then set -- --kube-version "$kv"; else set --; fi
+
+            # Fail CLOSED. This was a ::warning:: that let the job continue, which made the gate
+            # worse than absent: a chart that does not render contributes zero image references, the
+            # loop below finds nothing to object to, and the job goes green having verified nothing.
+            # The gate exists because oasgen-provider#62 shipped a chart referencing an unpublished
+            # tag and every generated controller ImagePullBackOff'd -- a protection that silently
+            # switches itself off is not a protection.
+            #
+            # Observed live: oasgen-provider's stage-2 PR raised its floor to 1.36 and this job
+            # reported "checked 1 image reference(s)" -- the one chart with no floor -- while warning
+            # that the provider's two charts were not checked. It was green, and merged.
+            if ! helm template verify "$work/$name" "$@" > "$rendered" 2> "$work/$name.err"; then
+              echo "::error::${name} did not render, so its images could NOT be checked. A release gate that cannot inspect a chart has not verified it. $(head -c 300 "$work/$name.err")"
+              unrenderable=$((unrenderable+1))
             fi
 
             # Grep the rendered output rather than parsing YAML: images appear both as container `image:`
@@ -158,7 +180,17 @@ jobs:
           # Same prune list and vendored rule as release-oci.yaml's discovery; the root is never pruned.
           done < <(find "${CHART_ROOT:-.}" -mindepth 1 \( -name .git -o -name node_modules -o -name examples -o -name example -o -name __fixtures__ -o -name fixtures -o -name testdata -o -name test -o -name tests -o -name docs \) -prune -o -name Chart.yaml -print | sort)
 
-          echo "checked ${checked} image reference(s)"
+          echo "checked ${checked} image reference(s) across ${charts} chart(s)"
+
+          # Assert the gate FOUND something to inspect, rather than merely finishing without
+          # objecting. "checked 0 image reference(s)" is what this job printed every time it
+          # silently skipped a chart it could not render, and it is indistinguishable from a
+          # healthy run over charts that genuinely reference no images. Naming the unrenderable
+          # count, and failing on it, is what turns "nothing objected" into "nothing was wrong".
+          if [ "$unrenderable" -gt 0 ]; then
+            echo "::error::${unrenderable} of ${charts} chart(s) could not be rendered, so their images were never checked. This job previously warned and passed in that case, which is how a chart with an unpublished image tag can sail through its own gate." >&2
+            exit 1
+          fi
           if [ "$failed" -gt 0 ]; then
             echo "::error::${failed} chart-referenced image(s) do not exist. A release with these values would ImagePullBackOff on every install." >&2
             exit 1
