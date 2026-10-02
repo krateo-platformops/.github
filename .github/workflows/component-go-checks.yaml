@@ -1,4 +1,4 @@
-# Reusable: canonical Go PR checks (unit tests + optional CRD-drift guard) for every krateo-* Go
+# Reusable: canonical Go PR checks (static analysis, unit tests, optional CRD-drift guard) for every krateo-* Go
 # code repo — called from release-pullrequest.yaml. Runs from the module dir so it survives the
 # go/<repo> monorepo fold. The test invocation is passed verbatim via `test_args` so each repo keeps
 # its exact behavior (build tags, timeouts, -coverpkg, …) while sharing ONE workflow.
@@ -19,11 +19,88 @@ on:
         description: "Args appended to `go test` (verbatim). Set per repo to preserve tags/flags."
         type: string
         default: "-race -coverprofile=coverage.txt -covermode=atomic ./..."
+      vet:
+        description: "Run `go vet ./...` from the module dir."
+        type: boolean
+        default: true
+      fmt_check:
+        description: >-
+          Fail when `gofmt -l` reports files. Opt-in per repo: turn it on once the module is clean,
+          so enabling the check and paying off a formatting backlog stay separate commits.
+        type: boolean
+        default: false
     secrets:
       CODECOV_TOKEN:
         required: false
 
 jobs:
+  # Deliberately a SEPARATE job from `test`, not extra steps in it. As steps, a formatting nit
+  # would fail the job before `go test` ran and hide every test result behind whitespace; as its
+  # own job both signals land on the PR at once, and neither masks the other.
+  #
+  # NOTE this is not a PR-only check. Of the 7 call sites, two are release gates --
+  # core-provider/release-tag.yaml and oasgen-provider/test.yaml -- where a caller job feeds
+  # `needs:` for the image build. A failure here therefore blocks a release, not just a merge.
+  # That is deliberate for `vet`: it is fast, deterministic and offline, which is the same bar
+  # release-tag.yaml already applies when it excludes the kind-based integration tests from the
+  # tag path. It is a further argument for keeping `fmt_check` opt-in: whitespace should not be
+  # able to stand between a tag and its artifacts in a repo that has not chosen that.
+  static:
+    name: static analysis
+    if: ${{ inputs.vet || inputs.fmt_check }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ inputs.module }}/go.mod
+
+      # gofmt is opt-in because the fleet is not uniformly clean, and flipping one shared reusable
+      # would red-tick every PR in the repos that are not. Measured 2026-10-02 across all five
+      # callers: helm-render-service, authn and oasgen-provider clean; core-provider 8 files;
+      # snowplow 134 files / 1887 lines (hand-written, none generated). Those two want a cleanup
+      # commit of their own first. Flip the default to true once the fleet is clean.
+      - name: gofmt
+        if: ${{ inputs.fmt_check }}
+        working-directory: ${{ inputs.module }}
+        run: |
+          set -uo pipefail
+          # (^|/)vendor/ -- NOT '/vendor/'. gofmt -l prints paths relative to the module dir, so a
+          # root-level vendor/ has no leading slash and a '/vendor/' filter silently misses it.
+          # No caller vendors today; this is here so the first one that does does not get noise.
+          unformatted=$(gofmt -l . | grep -vE '(^|/)vendor/' || true)
+
+          # Assert the check FOUND something to look at. `gofmt -l` over a directory with no .go
+          # files prints nothing and exits 0 -- identical to "everything is formatted". A wrong
+          # `module` input would therefore pass this step while examining zero files, and the green
+          # tick would mean nothing. Fail loudly instead.
+          examined=$(find . -name '*.go' -not -path '*/vendor/*' | grep -c . || true)
+          if [ "$examined" -eq 0 ]; then
+            echo "::error::gofmt examined 0 .go files under '${{ inputs.module }}'. Check the module input -- a check that inspects nothing passes for the wrong reason." >&2
+            exit 1
+          fi
+
+          # "until gofmt -l is empty", not "run it once": gofmt -w is not always idempotent in a
+          # single pass. Reproduced on go1.25.1 against core-provider's crdwatch_envtest_test.go --
+          # the doc-comment reflow inserts list separators, and formatting the result reflows it
+          # again. One pass leaves the file still listed, two converge. A contributor who runs it
+          # once, sees no further diff and pushes would otherwise get a red tick they cannot explain.
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt would rewrite these files. In ${{ inputs.module }}, run 'gofmt -w .' until 'gofmt -l .' prints nothing (doc comments can need two passes), then commit." >&2
+            printf '%s\n' "$unformatted" >&2
+            exit 1
+          fi
+          echo "gofmt: clean ($examined .go files examined)"
+
+      # vet defaults ON: measured clean in all 8 modules across all 5 callers on 2026-10-02, so
+      # there is no backlog to pay off and nothing to stage. Unlike gofmt it reports real defects
+      # rather than whitespace, which is why it is worth having on by default and why the escape
+      # hatch exists only for a repo that hits a false positive.
+      - name: go vet
+        if: ${{ inputs.vet }}
+        working-directory: ${{ inputs.module }}
+        run: go vet ./...
+
   test:
     name: test
     runs-on: ubuntu-latest
