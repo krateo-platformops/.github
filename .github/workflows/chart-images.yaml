@@ -91,7 +91,7 @@ jobs:
             echo "::error::chart_root '${CHART_ROOT}' is not a directory"; exit 1
           fi
 
-          work="$(mktemp -d)"; failed=0; checked=0
+          work="$(mktemp -d)"; failed=0; checked=0; skipped=()
 
           while IFS= read -r chart; do
             d="$(dirname "$chart")"
@@ -112,9 +112,36 @@ jobs:
               helm dependency build "$work/$name" >/dev/null 2>&1 || helm dependency update "$work/$name" >/dev/null 2>&1 \
                 || echo "::warning::${name}: helm dependency build/update failed"
             fi
+            # Render at the chart's OWN declared floor, not at whatever Kubernetes version the runner's
+            # helm happens to be compiled for.
+            #
+            # Without this, `helm template` renders at helm's built-in default -- v1.34.0 on helm 3.19.0 --
+            # so any chart declaring kubeVersion above that fails to render, and the branch below turns
+            # that into a WARNING. The job then goes green having checked nothing, which is the worst
+            # possible shape for a gate whose entire job is to catch a chart referencing an image that was
+            # never published (the regression that made this workflow exist). Observed on
+            # oasgen-provider#178, which raised a floor to 1.36:
+            #
+            #   ##[warning]oasgen-provider did not render, so its images were NOT checked:
+            #             chart requires kubeVersion: >=1.36.0-0 which is incompatible with v1.34.0
+            #   checked 1 image reference(s)
+            #
+            # Deriving the version from the chart rather than pinning a constant means this keeps working
+            # when a floor moves, and asserts the chart renders on the OLDEST cluster it claims to support.
+            # The -0 prerelease suffix conventional in these floors (">=1.36.0-0") is dropped: it exists to
+            # admit prereleases in the constraint, and helm wants a concrete version here.
+            kv="$(sed -n 's/^kubeVersion:[[:space:]]*//p' "$work/$name/Chart.yaml" | head -1 | tr -d \'\"\')"
+            floor="$(printf '%s' "$kv" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+            kvargs=()
+            if [ -n "$floor" ]; then
+              kvargs=(--kube-version "$floor")
+              echo "${name}: rendering at its declared floor ${floor} (kubeVersion: ${kv})"
+            fi
+
             rendered="$work/$name.rendered.yaml"
-            if ! helm template verify "$work/$name" > "$rendered" 2> "$work/$name.err"; then
+            if ! helm template verify "$work/$name" "${kvargs[@]}" > "$rendered" 2> "$work/$name.err"; then
               echo "::warning::${name} did not render, so its images were NOT checked: $(head -c 300 "$work/$name.err")"
+              skipped+=("${name}")
             fi
 
             # Grep the rendered output rather than parsing YAML: images appear both as container `image:`
@@ -161,6 +188,21 @@ jobs:
           echo "checked ${checked} image reference(s)"
           if [ "$failed" -gt 0 ]; then
             echo "::error::${failed} chart-referenced image(s) do not exist. A release with these values would ImagePullBackOff on every install." >&2
+            exit 1
+          fi
+
+          # A chart that did not render is a chart whose images were never looked at, so passing here
+          # would report "every chart-referenced image exists" having checked none of them. That is how
+          # this gate failed open: a floor above the runner helm's default silently removed two charts
+          # from the check and the job still went green.
+          #
+          # Rendering now happens at each chart's own declared floor, so a declared kubeVersion can no
+          # longer cause this. Anything still failing to render is a genuine defect -- a template error,
+          # or dependencies that could not be resolved -- and a chart that cannot be rendered with its own
+          # defaults is not a chart that should be published.
+          if [ "${#skipped[@]}" -gt 0 ]; then
+            echo "::error::${#skipped[@]} chart(s) did not render, so their images were NOT checked: ${skipped[*]}" >&2
+            echo "::error::Fix the rendering error above. This gate cannot vouch for a chart it could not render." >&2
             exit 1
           fi
           echo "OK: every chart-referenced image exists"
