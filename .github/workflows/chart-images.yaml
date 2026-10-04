@@ -132,7 +132,12 @@ jobs:
             # The -0 prerelease suffix conventional in these floors (">=1.36.0-0") is dropped: it exists to
             # admit prereleases in the constraint, and helm wants a concrete version here.
             kv="$(sed -n 's/^kubeVersion:[[:space:]]*//p' "$work/$name/Chart.yaml" | head -1 | tr -d \'\"\')"
-            floor="$(printf '%s' "$kv" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+            # `|| true` is load-bearing: grep exits 1 when it matches nothing, and under
+            # `set -euo pipefail` that aborts the whole step. Most charts declare no kubeVersion at
+            # all, so the empty case is the COMMON one, not the edge case. Without this the gate dies
+            # silently inside the loop before rendering anything -- no output, no ::error::, just
+            # exit 1 -- which is a worse failure than the one this workflow was fixed to prevent.
+            floor="$(printf '%s' "$kv" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
             kvargs=()
             if [ -n "$floor" ]; then
               kvargs=(--kube-version "$floor")
