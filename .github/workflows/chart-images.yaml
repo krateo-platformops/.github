@@ -132,7 +132,12 @@ jobs:
             # The -0 prerelease suffix conventional in these floors (">=1.36.0-0") is dropped: it exists to
             # admit prereleases in the constraint, and helm wants a concrete version here.
             kv="$(sed -n 's/^kubeVersion:[[:space:]]*//p' "$work/$name/Chart.yaml" | head -1 | tr -d \'\"\')"
-            floor="$(printf '%s' "$kv" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+            # `|| true` is load-bearing: grep exits 1 when it matches nothing, which is the normal case
+            # for a chart that declares no kubeVersion -- and under `set -euo pipefail` that status
+            # propagates out of the command substitution and kills the whole step, silently, after the
+            # "resolved:" line. Nearly every chart in the estate declares no floor, so without this the
+            # gate aborts on the first one it meets and no repo gets its images checked at all.
+            floor="$(printf '%s' "$kv" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
             kvargs=()
             if [ -n "$floor" ]; then
               kvargs=(--kube-version "$floor")
