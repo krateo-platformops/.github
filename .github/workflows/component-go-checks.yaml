@@ -29,6 +29,13 @@ on:
           so enabling the check and paying off a formatting backlog stay separate commits.
         type: boolean
         default: false
+      tidy_check:
+        description: >-
+          Fail when `go mod tidy` would change go.mod/go.sum. Opt-in. Aimed at monorepos whose
+          modules `replace` each other by path, where a dependency bump in one module silently
+          invalidates a sibling's go.sum.
+        type: boolean
+        default: false
     secrets:
       CODECOV_TOKEN:
         required: false
@@ -100,6 +107,51 @@ jobs:
         if: ${{ inputs.vet }}
         working-directory: ${{ inputs.module }}
         run: go vet ./...
+
+      # For monorepos whose modules replace each other by path:
+      #
+      #   replace github.com/<org>/<sibling> => ../<sibling>
+      #
+      # a dependency bump in the SIBLING changes this module's dependency graph, so its own
+      # go.mod/go.sum stop satisfying it. Nothing in the bumping PR touches this module, and the
+      # author has no reason to look here.
+      #
+      # Observed in core-provider#160: a dependabot PR bumping containerd in
+      # composition-dynamic-controller failed three chart-inspector checks, with a diff confined to
+      # cdc. It took three hypotheses to find -- "stale base" (disproved by rebasing) and "a
+      # pre-existing problem the new vet job exposes" (disproved by the same job passing on another
+      # PR off the same main) -- before the path replace explained a module failing while its files
+      # matched main byte for byte.
+      #
+      # `go vet` already fails in that situation, but only with "go: updates to go.mod needed",
+      # which names no module and reads like a toolchain complaint. This step says which module,
+      # what to run, and why a PR that never touched it is red. Dependabot cannot produce the
+      # companion commit itself: it bumps one module and cannot know a sibling replaces it by path.
+      - name: go mod tidy is a no-op
+        if: ${{ inputs.tidy_check }}
+        working-directory: ${{ inputs.module }}
+        run: |
+          set -uo pipefail
+          cp go.mod /tmp/go.mod.before
+          [ -f go.sum ] && cp go.sum /tmp/go.sum.before || : > /tmp/go.sum.before
+          if ! go mod tidy; then
+            echo "::error::${{ inputs.module }}: 'go mod tidy' itself failed; the module cannot be resolved." >&2
+            exit 1
+          fi
+          # Compare against the captured copies rather than `git diff`: this runs in a checkout that
+          # other steps may have touched, and a guard that silently diffs the wrong thing is worse
+          # than no guard.
+          changed=0
+          diff -u /tmp/go.mod.before go.mod > /tmp/go.mod.diff 2>&1 || changed=1
+          if [ -f go.sum ]; then diff -u /tmp/go.sum.before go.sum > /tmp/go.sum.diff 2>&1 || changed=1; fi
+          if [ "$changed" -ne 0 ]; then
+            echo "::error::${{ inputs.module }}: go.mod/go.sum are not tidy. Run 'go mod tidy' in ${{ inputs.module }} and commit the result." >&2
+            echo "::error::If this PR did not touch ${{ inputs.module }}, a SIBLING module it replaces by path was bumped -- see core-provider#160. The companion tidy belongs in this PR." >&2
+            head -40 /tmp/go.mod.diff 2>/dev/null >&2 || true
+            head -20 /tmp/go.sum.diff 2>/dev/null >&2 || true
+            exit 1
+          fi
+          echo "go mod tidy: no change (${{ inputs.module }})"
 
   test:
     name: test
