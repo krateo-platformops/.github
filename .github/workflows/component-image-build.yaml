@@ -23,6 +23,15 @@ on:
         description: "Push (true for release tags; false for PR validate-only builds)."
         type: boolean
         default: true
+      version:
+        description: >-
+          Image tag, when the version does not come from the git ref. Left empty (the default) the tags
+          are derived from the ref as before. Set it when a repository releases a chart AND the image it
+          references from one source of truth: the chart's release job creates the tag with
+          GITHUB_TOKEN, and a tag pushed with GITHUB_TOKEN does not trigger workflows, so the image
+          build cannot be driven by that tag and must be told the version instead.
+        type: string
+        default: ""
 
 jobs:
   build:
@@ -75,6 +84,10 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository_owner }}/${{ matrix.mod }}
+          # An explicit version replaces the ref-derived tags entirely, so a caller that passes one
+          # gets exactly that tag and nothing else — no `latest`, no `sha-`, nothing to disagree with
+          # the chart that names it.
+          tags: ${{ inputs.version != '' && format('type=raw,value={0}', inputs.version) || '' }}
 
       - name: Login to GHCR
         uses: docker/login-action@v4
