@@ -171,9 +171,36 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: ${{ matrix.mod }}/go.mod
+      # `@latest` TOOK EVERY GO REPO'S CI DOWN ORG-WIDE on 2026-10-28. x/vuln v1.9.0 became
+      # `@latest` and declares `go 1.26.0`, so under GOTOOLCHAIN=local the INSTALL failed:
+      #   go: golang.org/x/vuln/cmd/govulncheck@latest: golang.org/x/vuln@v1.9.0 requires
+      #       go >= 1.26.0 (running go 1.24.0; GOTOOLCHAIN=local)
+      # Nothing in any repo had changed. An unpinned dependency in CI is the defect, so the tool
+      # version is now explicit.
+      #
+      # PINNING ALONE WAS NOT AN OPTION, which is worth recording so nobody "simplifies" it back.
+      # Every x/vuln release from v1.2.0 onward requires Go >= 1.25 (v1.8.0 and v1.9.0 require
+      # 1.26), so the newest version installable under a `go 1.24` module is v1.1.x -- a scanner
+      # two years stale. And there is no "raise the workflow's Go": `go-version-file` above means
+      # the Go version comes from EACH CONSUMING REPO's go.mod, so this workflow has none of its
+      # own to raise.
+      #
+      # GOTOOLCHAIN IS SCOPED TO THE INSTALL COMMAND, NOT SET AS A STEP-LEVEL `env:`, AND THAT IS
+      # LOAD-BEARING. The comment above explains that govulncheck reports standard-library
+      # vulnerabilities against the Go it RUNS ON -- that is why setup-go@v6 reads the module's
+      # `toolchain` line. A step-level GOTOOLCHAIN would let the SCAN select a newer toolchain
+      # too, re-reporting stdlib findings the module's own builds do not have, which is exactly
+      # krateo-platformops/provider-runtime#19. Only the install may use a different toolchain;
+      # the scan must stay on the module's.
+      #
+      # `|| true` STAYS ON THE SCAN AND MUST NEVER BE ADDED TO THE INSTALL. The scan is
+      # deliberately non-gating. A failing install, by contrast, is CI telling the truth: silencing
+      # it would leave a scan that reports nothing while looking green, and there are real findings
+      # behind this check -- core-provider measured 39 CALLED stdlib vulnerabilities on
+      # golang:1.26.0 and 0 on 1.26.10.
       - name: govulncheck
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          GOTOOLCHAIN=auto go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
           govulncheck ./... || true   # report first; drop `|| true` to gate
       - name: gosec (SARIF)
         uses: securego/gosec@master
