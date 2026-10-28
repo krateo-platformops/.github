@@ -164,7 +164,11 @@ jobs:
         working-directory: ${{ matrix.mod }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      # v6, not v5: v6 reads go.mod's `toolchain` line and v5 reads only `go`. govulncheck reports
+      # standard-library vulnerabilities against the Go it runs on. Under v5 a module at
+      # `go 1.26.0` + `toolchain go1.26.10` was scanned on 1.26.0 and listed ~36 stdlib findings
+      # that its 1.26.10 builds do not have (krateo-platformops/provider-runtime#19).
+      - uses: actions/setup-go@v6
         with:
           go-version-file: ${{ matrix.mod }}/go.mod
       - name: govulncheck
