@@ -297,10 +297,26 @@ jobs:
             sed -i -E 's#<(script|iframe|img|object|embed)[^>]*>##gI; s#</(script|iframe|object|embed)>##gI' .release-notes/notes.md
             echo "ok=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
-          # No notes. The likeliest cause by far is an expired subscription token, so say that rather
-          # than leaving someone to read action logs. A release must never keep the placeholder.
-          echo "::warning title=Release notes not generated::Generation for $TAG did not produce notes (step outcome: $GEN). Read the Generate step's log before assuming a cause: an expired CLAUDE_CODE_OAUTH_TOKEN is one possibility (regenerate with 'claude setup-token' and update the org secret), but so is a model error or a malformed range. The release itself is unaffected, and a re-run of this workflow will now replace this fallback body."
-          { echo "Generated notes are unavailable for this release. Commits in this tag:"; echo;
+          # No notes. A release must never keep the placeholder.
+          #
+          # Say WHY when the generator told us. "Unavailable" alone reads as a transient hiccup, but a
+          # subscription usage limit holds for every repo in the org until it resets, and the only way
+          # a reader learned that was from someone who had read this job's log. Only a fixed sentence
+          # and a reset time matched by a narrow pattern reach the body, never a raw log line: the log
+          # can carry model output shaped by commit messages, and the release page renders Markdown.
+          REASON=""
+          if [ -s "$RUNNER_TEMP/gen.log" ] && grep -qiE "hit your [a-z ]*limit" "$RUNNER_TEMP/gen.log"; then
+            RESET=$(grep -oE "resets [A-Za-z0-9 ,:()]{1,40}" "$RUNNER_TEMP/gen.log" | head -n 1 | sed -E 's/ +$//' || true)
+            REASON="The org's Claude subscription token has hit its usage limit${RESET:+ (it ${RESET})}, so every release in the org gets this fallback until it resets. Re-run this workflow after the reset to replace it."
+          fi
+          if [ -n "$REASON" ]; then
+            echo "::warning title=Release notes not generated::$TAG: $REASON The release itself is unaffected."
+          else
+            echo "::warning title=Release notes not generated::Generation for $TAG did not produce notes (step outcome: $GEN). Read the Generate step's log before assuming a cause: an expired CLAUDE_CODE_OAUTH_TOKEN is one possibility (regenerate with 'claude setup-token' and update the org secret), but so is a model error or a malformed range. The release itself is unaffected, and a re-run of this workflow will now replace this fallback body."
+          fi
+          # The first sentence must stay exactly the claim step's FALLBACK string: that match is what
+          # lets a re-run replace this body. The reason goes after it, never before or inside it.
+          { echo "Generated notes are unavailable for this release.${REASON:+ $REASON} Commits in this tag:"; echo;
             cat .release-notes/subjects.txt; } > .release-notes/notes.md
           echo "ok=fallback" >> "$GITHUB_OUTPUT"
 
