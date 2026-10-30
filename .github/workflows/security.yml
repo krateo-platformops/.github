@@ -120,17 +120,6 @@ jobs:
             '''values\.schema\.json$''',
           ]
           [[allowlists]]
-          description = "Published upstream constants: documented defaults shipped BY the vendor chart"
-          # Keyed on the LINE, not the matched value: the key name is the stable property and the
-          # upstream default's value can change. Keyed here rather than in a repo .gitleaksignore
-          # because a fingerprint is commit:file:rule:line and stops matching the moment the line
-          # moves -- a re-vendor, or inserting a line above it, resurfaces a long-accepted finding
-          # as a FRESH leak indistinguishable from a real one (#32).
-          regexTarget = "line"
-          regexes = [
-            '''horizon_secret_key''',
-          ]
-          [[allowlists]]
           description = "Well-known non-secret placeholder/example values"
           regexTarget = "match"
           regexes = [
