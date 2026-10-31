@@ -96,7 +96,10 @@ jobs:
           # manifests, Helm template partials and JSON schemas are not secret stores; they trip
           # the generic-api-key / entropy heuristics on example identifiers and template syntax.
           # Real secrets in source (values.yaml, code, config) are still caught. Repo-specific
-          # accepted findings live in a repo-level .gitleaksignore (also honoured below).
+          # accepted findings live in a repo-level .gitleaksignore (also honoured below) -- which is
+          # for GENUINELY ONE-OFF cases only. A finding that recurs (a published upstream constant, a
+          # vendored default) must be allowlisted by path or pattern ABOVE instead: a fingerprint is
+          # commit:file:rule:line and survives nothing, where a pattern survives a line moving (#32).
           cat > /tmp/krateo-gitleaks.toml <<'TOML'
           title = "krateo-gitleaks"
           [extend]
@@ -125,7 +128,29 @@ jobs:
             '''dGhpcnR5X3R3b19ieXRl[A-Za-z0-9+/=]*''',
           ]
           TOML
-          ./gitleaks detect --source=. --config=/tmp/krateo-gitleaks.toml --redact --no-banner --exit-code=1
+          # --redact keeps the secret out of the log and must stay. But on its own the job prints
+          # "leaks found: N" and nothing else -- not the rule, the file, or the fingerprint -- so a
+          # recurrence cannot be diagnosed from CI at all (#32). The JSON report carries the
+          # identifying fields while the value stays redacted: we can name the finding without
+          # ever printing it.
+          set +e
+          ./gitleaks detect --source=. --config=/tmp/krateo-gitleaks.toml --redact --no-banner \
+            --exit-code=1 --report-format json --report-path /tmp/gitleaks.json
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            if [ -s /tmp/gitleaks.json ]; then
+              echo "::error::gitleaks found $(jq -r 'length' /tmp/gitleaks.json) finding(s); identifying fields only, values stay redacted:"
+              jq -r '.[] | "  \(.RuleID)  \(.File):\(.StartLine)  fingerprint=\(.Fingerprint)"' /tmp/gitleaks.json
+              echo "::error::A published upstream constant that RECURS belongs in this workflow's allowlist by path or pattern, not in a repo .gitleaksignore whose commit:file:rule:line fingerprint stops matching when the line moves."
+            else
+              # A non-zero exit with no report is NOT a clean scan and must not read as one: it means
+              # gitleaks could not run (bad config, failed download). Say which it was, or a broken
+              # scanner is indistinguishable from a passing one.
+              echo "::error::gitleaks exited $rc and produced NO report -- the scan did not complete. This is a failed MEASUREMENT, not a clean result."
+            fi
+            exit "$rc"
+          fi
 
   # --- SAST via CodeQL (Go and/or JS/TS) ---
   codeql:
