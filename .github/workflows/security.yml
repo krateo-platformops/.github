@@ -223,10 +223,22 @@ jobs:
       # it would leave a scan that reports nothing while looking green, and there are real findings
       # behind this check -- core-provider measured 39 CALLED stdlib vulnerabilities on
       # golang:1.26.0 and 0 on 1.26.10.
+      #
+      # The install and the module download go through the go-download action, which retries
+      # ONLY transient network errors (a dropped proxy.golang.org stream failed this job in
+      # provider-runtime on 2026-10-28). A real install failure, like the x/vuln one above, still
+      # fails on the first attempt, so the "never silence the install" rule holds.
+      - name: Download modules
+        uses: krateo-platformops/.github/.github/actions/go-download@main
+        with:
+          working-directory: ${{ matrix.mod }}
+      - name: Install govulncheck
+        uses: krateo-platformops/.github/.github/actions/go-download@main
+        with:
+          working-directory: ${{ matrix.mod }}
+          run: GOTOOLCHAIN=auto go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
       - name: govulncheck
-        run: |
-          GOTOOLCHAIN=auto go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
-          govulncheck ./... || true   # report first; drop `|| true` to gate
+        run: govulncheck ./... || true   # report first; drop `|| true` to gate
       - name: gosec (SARIF)
         uses: securego/gosec@master
         with: { args: "-no-fail -fmt sarif -out gosec.sarif ${{ matrix.mod }}/..." }

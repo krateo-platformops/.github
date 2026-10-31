@@ -1,0 +1,53 @@
+# NOT reusable: this repo's own CI for the go-download action (.github/actions/go-download).
+# Every other file here is a workflow_call shared by the org; this one only tests the action
+# that several of them use, so a change to its retry rules cannot ship untested to every repo.
+name: test-go-download
+
+on:
+  pull_request:
+    paths: [".github/actions/go-download/**", ".github/workflows/test-go-download.yaml"]
+  push:
+    branches: [main]
+    paths: [".github/actions/go-download/**", ".github/workflows/test-go-download.yaml"]
+
+permissions:
+  contents: read
+
+jobs:
+  retry-rules:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: retry.sh retries transient errors only
+        run: bash .github/actions/go-download/retry_test.sh
+
+  # Exercises action.yml itself (inputs, env, working-directory) from this checkout, in both
+  # directions: a real download succeeds, and a non-transient failure still fails the step.
+  action-wiring:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+      - name: A throwaway module with one dependency
+        run: |
+          mkdir -p "$RUNNER_TEMP/m" && cd "$RUNNER_TEMP/m"
+          go mod init example.com/m
+          go mod edit -require=golang.org/x/text@v0.20.0
+      - name: Download through the action
+        uses: ./.github/actions/go-download
+        with:
+          working-directory: ${{ runner.temp }}/m
+      - name: The dependency is in the module cache
+        working-directory: ${{ runner.temp }}/m
+        run: test -n "$(go list -m -f '{{.Dir}}' golang.org/x/text)"
+      - name: A missing module is not retried and fails the step
+        id: missing
+        continue-on-error: true
+        uses: ./.github/actions/go-download
+        with:
+          working-directory: ${{ runner.temp }}/m
+          run: go mod download example.invalid/nope@v1.0.0
+      - name: Assert that it failed
+        run: test "${{ steps.missing.outcome }}" = failure
