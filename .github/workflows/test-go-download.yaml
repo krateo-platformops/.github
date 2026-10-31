@@ -39,9 +39,10 @@ jobs:
         uses: ./.github/actions/go-download
         with:
           working-directory: ${{ runner.temp }}/m
+      # Check the cache directory itself. `go list -m -f '{{.Dir}}'` prints nothing for a module
+      # no package imports, and `go mod download -json` would download it again.
       - name: The dependency is in the module cache
-        working-directory: ${{ runner.temp }}/m
-        run: test -n "$(go list -m -f '{{.Dir}}' golang.org/x/text)"
+        run: test -d "$(go env GOMODCACHE)/golang.org/x/text@v0.20.0"
       - name: A missing module is not retried and fails the step
         id: missing
         continue-on-error: true
