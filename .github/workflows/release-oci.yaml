@@ -150,6 +150,20 @@ jobs:
         with:
           version: v3.19.0
 
+      # ubuntu-latest ships yq today, but "the runner has it" is the kind of assumption that turns
+      # into a red release at the worst moment. Pinned so a yq behaviour change cannot alter what
+      # gets stamped into every chart in the org.
+      - name: Ensure yq (pinned)
+        run: |
+          set -euo pipefail
+          want=v4.44.3
+          if ! command -v yq >/dev/null 2>&1 || ! yq --version 2>/dev/null | grep -q "${want}"; then
+            sudo curl -fsSL -o /usr/local/bin/yq \
+              "https://github.com/mikefarah/yq/releases/download/${want}/yq_linux_amd64"
+            sudo chmod +x /usr/local/bin/yq
+          fi
+          yq --version
+
       - name: Registry login
         run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
 
@@ -158,6 +172,9 @@ jobs:
           CHART_VERSION: ${{ steps.ver.outputs.chart_version }}
           APP_VERSION: ${{ steps.ver.outputs.app_version }}
           CHART_ROOT: ${{ inputs.chart_root }}
+          GIT_SHA: ${{ github.sha }}
+          SRC_URL: ${{ github.server_url }}/${{ github.repository }}
+          SRC_REF: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           if [ ! -d "${CHART_ROOT:-.}" ]; then
@@ -189,6 +206,31 @@ jobs:
             echo "::group::package ${d}"
             # Opt-in placeholder substitution (untouched if a placeholder is absent).
             sed -i "s/CHART_VERSION/${CHART_VERSION}/g; s/SOURCE_REF/${CHART_VERSION}/g" "${d}/Chart.yaml"
+
+            # Stamp PROVENANCE as OCI annotations, so a published chart says which commit built it
+            # instead of leaving a consumer to reverse-engineer it. installer's check-pin-ci gate has
+            # to answer "was this exact chart's CI green?", and until now it inferred the answer:
+            # chart version -> appVersion -> a tag of a guessed repo -> that tag's check-runs. Every
+            # link is a guess, and two of them broke in one evening.
+            #   • krateo-observability 0.1.24 declares appVersion 3.2.0, which is the UPSTREAM
+            #     ClickStack version it deploys, not a tag of ours and never will be. The chain has
+            #     no valid link at all for any wrapper chart, so the pin was unverifiable.
+            #   • github-provider-kog 0.7.0 lives in krateo-blueprints while the gate's token is
+            #     minted per-org, so the lookup 403s. 26 of the installer's 68 pins are cross-org
+            #     and share that blindness.
+            # An annotation in the artefact needs no token, no repo guess and no appVersion
+            # convention: it is read from the chart the consumer already pulled.
+            #
+            # Annotations rather than a comment because `helm package` preserves Chart.yaml's data
+            # and discards nothing else it cannot see — a comment does not survive being read back
+            # out of the .tgz. Merged with yq rather than appended with sed so a chart that already
+            # authors `annotations:` keeps its own keys, and so re-running is idempotent.
+            yq -i '
+              .annotations."org.opencontainers.image.revision" = strenv(GIT_SHA) |
+              .annotations."org.opencontainers.image.source"   = strenv(SRC_URL) |
+              .annotations."org.opencontainers.image.version"  = strenv(CHART_VERSION) |
+              .annotations."org.opencontainers.image.ref.name" = strenv(SRC_REF)
+            ' "${d}/Chart.yaml"
             if [ -n "${APP_VERSION}" ]; then
               sed -i "s/APP_VERSION/${APP_VERSION}/g" "${d}/Chart.yaml"
             fi
@@ -202,6 +244,25 @@ jobs:
             out="$(helm package "${d}" -d dist/)"
             echo "${out}"
             tgz_of["${d}"]="${out##*: }"
+
+            # ASSERT THE STAMP SURVIVED. A step that silently does nothing is worse than no step:
+            # every consumer would then read "no provenance" as "an old chart" forever, and the gate
+            # downstream would keep falling back to inference while believing it had the real thing.
+            # So read the annotation back out of the package actually about to be pushed, not out of
+            # the working tree we just edited.
+            # The directory INSIDE the .tgz is named after the chart's `name`, not after the
+            # directory on disk -- `chart/` with `name: installer` packages as `installer/Chart.yaml`.
+            # Using basename "${d}" here would have made this assertion fail on every repo in the org
+            # whose chart lives in a generically-named directory, which is most of them.
+            cname="$(yq -r '.name' "${d}/Chart.yaml")"
+            stamped="$(tar -xzOf "${tgz_of[${d}]}" "${cname}/Chart.yaml" 2>/dev/null \
+              | yq -r '.annotations."org.opencontainers.image.revision" // ""')"
+            if [ "${stamped}" != "${GIT_SHA}" ]; then
+              echo "::error::${d}: provenance annotation missing or wrong in $(basename "${tgz_of[${d}]}")"
+              echo "::error::  expected revision ${GIT_SHA}, package carries '${stamped:-<none>}'"
+              exit 1
+            fi
+            echo "provenance: $(basename "${tgz_of[${d}]}") -> ${stamped}"
             echo "::endgroup::"
           done
 
