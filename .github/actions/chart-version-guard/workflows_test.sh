@@ -59,6 +59,15 @@ digest() { # $1=chart $2=tag [$3=registry path]: the manifest digest, or "absent
   printf '%s' "${d:-absent}"
 }
 
+# The org.opencontainers.image.revision annotation of a published chart ("" when it has none).
+published_revision() { # $1=chart $2=tag
+  local layer
+  layer="$(curl -sS -H 'Accept: application/vnd.oci.image.manifest.v1+json' "http://${reg}/v2/${ns_path}/$1/manifests/$2" |
+    jq -r '.layers[] | select(.mediaType == "application/vnd.cncf.helm.chart.content.v1.tar+gzip") | .digest')"
+  curl -sS "http://${reg}/v2/${ns_path}/$1/blobs/${layer}" | tar -xzO "$1/Chart.yaml" |
+    awk '/^  org\.opencontainers\.image\.revision:/ { print $2 }' | tr -d "\"'"
+}
+
 # Runs a step script in a fresh copy of a fixture repo, as Actions runs `shell: bash`.
 n=0
 run_step() { # $1=script $2=fixture repo; env passed through. Sets $rc, $log.
@@ -116,6 +125,15 @@ expect "release: next tag, nothing changed: every chart skipped" 0 \
   "+skipped: other-0.2.0.tgz is already published, contents identical" \
   "-Pushing" "+done: pushed 0, skipped 3"
 expect "release: ... and no digest moved" any "=$(digest app 0.1.0)=$app1" "=$(digest app-crds 0.1.0)=$crds1" "=$(digest other 0.2.0)=$other1"
+# With provenance stamping (krateo-platformops/.github#38), the second run stamped a new commit
+# into its packages; the skip must keep the artifact whose stamp names the commit that first
+# published the version.
+if grep -q 'org.opencontainers.image.revision' "$tmp/release.sh"; then
+  expect "release: ... the published stamp still names the first commit" any \
+    "=$(published_revision app 0.1.0)=1111111111111111111111111111111111111111"
+else
+  echo "--   release-oci does not stamp provenance on this branch; no stamp to check"
+fi
 
 changed="$tmp/src-changed"
 cp -R "$src" "$changed"
