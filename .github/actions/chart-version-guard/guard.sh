@@ -225,6 +225,12 @@ tar -xzf "$tmp/published.tgz" -C "$tmp/published" 2>"$tmp/tar.err" ||
   fail "cannot extract the published package: $(head -c 300 "$tmp/tar.err")"
 published_top="$(top_dir "$tmp/published")" || fail "the published package does not hold exactly one chart directory"
 
+# KEEP IN STEP WITH THE STAMP. These four org.opencontainers.image.* keys (revision, source, version,
+# ref.name) are exactly the ones release-oci's provenance stamp step (krateo-platformops/.github#38)
+# writes. If that step ever adds a key (org.opencontainers.image.created, say, a timestamp), this
+# list MUST gain it in the same change. Otherwise every re-release of an unchanged chart is refused
+# as "different", on every caller at once, and the error points here rather than at the stamp.
+# guard_test.sh fails when the stamp step writes a key this list does not strip.
 # Drops the provenance annotations from helm-written Chart.yaml (two-space indentation, one key
 # per line; a multi-line value continues on deeper-indented or blank lines), plus an annotations
 # header left with no keys.
@@ -242,7 +248,8 @@ strip_provenance='
   /^annotations:[ ]*$/ { inann = 1; hdr = $0; skip = 0; next }
   { print }
 '
-# The lines the exclusion may remove, as `diff` prints a removed line.
+# The lines the exclusion may remove, as `diff` prints a removed line. The key list here must match
+# strip_provenance's, which must match release-oci's stamp step: see "KEEP IN STEP WITH THE STAMP".
 removable_chart='^< (  "?org\.opencontainers\.image\.(revision|source|version|ref\.name)"?:.*|annotations:[ ]*)$'
 removable_lock='^< generated:.*$'
 

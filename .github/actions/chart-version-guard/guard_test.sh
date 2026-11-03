@@ -159,6 +159,26 @@ fixture stamped_tpl "$(stamp_prog 3333333333333333333333333333333333333333 3.1.3
 edit stamped_tpl '{ print } /^data:/ { print "  extra: \"changed\"" }' templates/configmap.yaml
 check "stamped, and a template changed" 11 "$(package stamped_tpl)" "$ns_stamped" "changed:           templates/configmap.yaml"
 
+# Every key release-oci's stamp step writes must be one guard.sh strips. A key it does not know
+# would make every unchanged re-release "different", on every caller at once. The keys are read
+# from the stamp step itself (the quoted yq paths of krateo-platformops/.github#38), and each is
+# stamped with a per-run value onto the chart published above, which must stay "identical".
+release_oci="$here/../../workflows/release-oci.yaml"
+stamp_keys="$(grep -oE '"org\.opencontainers\.image\.[A-Za-z0-9.-]+"' "$release_oci" | tr -d '"' | sort -u)"
+if [ -z "$stamp_keys" ]; then
+  if grep -q 'yq -i' "$release_oci"; then
+    echo "FAIL stamp keys: release-oci.yaml runs yq -i but no quoted org.opencontainers.image.* key was found; update this test to read the stamp step"
+    fail=1
+  else
+    echo "skip stamp keys: release-oci.yaml does not stamp provenance on this branch (krateo-platformops/.github#38 is not merged)"
+  fi
+else
+  for key in $stamp_keys; do
+    fixture "stampkey-${key##*.}" '{ print } /^annotations:/ { print "  '"$key"': per-run-'"$run_id"'" }' Chart.yaml
+    check "release-oci stamps ${key}: guard.sh strips it" 10 "$(package "stampkey-${key##*.}")" "$ns" "identical: "
+  done
+fi
+
 # A chart with no annotations of its own: the stamp creates the map, and removing the stamp must
 # remove the map with it.
 ns_bare="${ns}-bare"
