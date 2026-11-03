@@ -34,11 +34,19 @@
 #   • published with DIFFERENT contents      → the job fails and nothing is pushed. Bump the version.
 #   • the registry could not be asked        → the job fails and nothing is pushed. "Could not
 #                                              check" is never read as "not published".
+# The skip is a provenance guarantee, not tidiness. A published chart version's provenance (the
+# commit that BUILT it, as stamped into its org.opencontainers.image.* annotations) is only true if
+# that artifact is never re-pushed. Without the skip, every tag re-pushes every unchanged chart and
+# re-stamps it with the tag's commit, which did not build that version, and installer's pin-ci
+# would then vouch for the CI of the wrong commit. So provenance stamping must never run without
+# this skip in front of the push.
+#
 # Contents means the files in the package, not the .tgz bytes: `helm package` writes fresh mtimes,
 # so pushing an unchanged chart used to move its tag to a new digest on every release tag (seen on
 # observability 3.1.31/3.1.32). Per-run provenance annotations and Chart.lock's `generated` time do
-# not count either; guard.sh lists exactly what is ignored. A chart repo's pull requests can run the
-# same check through chart-version-guard.yaml.
+# not count either; guard.sh lists exactly what is ignored, checks that excluding them removes
+# nothing else, and refuses a comparison that excluding them would leave empty. A chart repo's
+# pull requests can run the same check through chart-version-guard.yaml.
 #
 # How versions are set (a chart opts in purely by which placeholders it authors):
 #   • CHART_VERSION → the release tag (or workflow_dispatch input)
@@ -232,6 +240,10 @@ jobs:
           # Ask the registry about every package before pushing any (see the header). A refusal or a
           # failed check stops the whole release, as a packaging failure does: a release that would
           # rewrite a published version, or that could not find out, is not one to half-publish.
+          #
+          # The skip (exit 10) is what keeps provenance true: the published artifact, stamped by the
+          # commit that built this version, stays. Pushing this run's package instead would re-stamp
+          # an unchanged version with a commit that did not build it.
           declare -A skip_of=()
           refused=()
           for d in "${charts[@]}"; do

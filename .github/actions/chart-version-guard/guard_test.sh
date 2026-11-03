@@ -54,6 +54,38 @@ stamp_new_prog() { # $1=revision
     print "  org.opencontainers.image.revision: '"$1"'" }'
 }
 
+sha_of() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1"; else shasum -a 256 "$1"; fi | awk '{ print $1 }'; }
+# Uploads file $2 as a blob to repository $1 of the test registry and prints its digest.
+blob_put() { # $1=repository path $2=file
+  local dg loc
+  dg="sha256:$(sha_of "$2")"
+  loc="$(curl -sS -X POST -D - -o /dev/null "http://${reg}/v2/$1/blobs/uploads/" | tr -d '\r' |
+    awk 'tolower($1) == "location:" { print $2 }')"
+  case "$loc" in /*) loc="http://${reg}${loc}" ;; esac
+  case "$loc" in *\?*) loc="${loc}&digest=${dg}" ;; *) loc="${loc}?digest=${dg}" ;; esac
+  curl -sSf -X PUT -H 'Content-Type: application/octet-stream' --data-binary @"$2" "$loc" >/dev/null ||
+    { echo "blob upload to $1 failed" >&2; exit 1; }
+  printf '%s' "$dg"
+}
+# Publishes a .tgz as a Helm chart artifact through the registry API, without helm: for packages
+# helm would refuse to push, and to put a package under a tag that is not its version.
+raw_push() { # $1=tgz $2=repository path (no host) $3=tag
+  local cfg="$tmp/raw-config.json" man="$tmp/raw-manifest.json" cd ld
+  printf '{}' >"$cfg"
+  cd="$(blob_put "$2" "$cfg")" && ld="$(blob_put "$2" "$1")" || exit 1
+  printf '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.cncf.helm.config.v1+json","digest":"%s","size":%s},"layers":[{"mediaType":"application/vnd.cncf.helm.chart.content.v1.tar+gzip","digest":"%s","size":%s}]}' \
+    "$cd" "$(wc -c <"$cfg" | tr -d ' ')" "$ld" "$(wc -c <"$1" | tr -d ' ')" >"$man"
+  curl -sSf -X PUT -H 'Content-Type: application/vnd.oci.image.manifest.v1+json' --data-binary @"$man" \
+    "http://${reg}/v2/$2/manifests/$3" >/dev/null || { echo "manifest upload to $2:$3 failed" >&2; exit 1; }
+}
+# A hand-made package: one chart directory holding only the Chart.yaml given on stdin.
+craft() { # $1=case $2=chart name; prints the .tgz path
+  mkdir -p "$tmp/$1/$2" && cat >"$tmp/$1/$2/Chart.yaml" && tar -czf "$tmp/$1.tgz" -C "$tmp/$1" "$2" && printf '%s' "$tmp/$1.tgz"
+}
+stamps() { # $1=revision: the four stamp keys, as helm writes them
+  printf '  org.opencontainers.image.ref.name: 3.1.4%s\n  org.opencontainers.image.revision: %s\n  org.opencontainers.image.source: https://github.com/krateo-platformops/example\n  org.opencontainers.image.version: 3.1.4%s\n' "${1:0:1}" "$1" "${1:0:1}"
+}
+
 check() { # $1=case $2=want (0|10|11|error) $3=tgz $4=oci repo [$5=text the output must contain]
   local rc out
   out="$(bash "$guard" "$3" "$4" 2>&1)"
@@ -136,7 +168,32 @@ fixture bare_stamped "$no_annotations" Chart.yaml
 edit bare_stamped "$(stamp_new_prog 4444444444444444444444444444444444444444)" Chart.yaml
 check "no own annotations: published unstamped, package stamped" 10 "$(package bare_stamped)" "$ns_bare" "identical: "
 
-# 6. The existence check errors: never "absent".
+# 6. The exclusion can never make the comparison vacuous.
+# Two packages whose only content is the lookup key (name, version) plus the stamp: once the stamp
+# is excluded nothing is left, so "identical" would prove nothing. helm refuses to package such a
+# chart, so these are made by hand and published through the registry API.
+ns_raw_path="guard-test-${run_id}-raw"
+published_vacuous="$(printf 'annotations:\n%s\nname: guard-vacuous\nversion: 0.1.0\n' "$(stamps aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)" | craft vac-pub guard-vacuous)"
+raw_push "$published_vacuous" "${ns_raw_path}/guard-vacuous" 0.1.0
+local_vacuous="$(printf 'annotations:\n%s\nname: guard-vacuous\nversion: 0.1.0\n' "$(stamps bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb)" | craft vac-loc guard-vacuous)"
+check "error: only the stamp differs, and nothing else is left to compare" error "$local_vacuous" "oci://${reg}/${ns_raw_path}" "nothing is left to compare"
+# Control: the same hand-made pair with one real field is compared, and found identical.
+published_minimal="$(printf 'annotations:\n%s\napiVersion: v2\nname: guard-minimal\nversion: 0.1.0\n' "$(stamps aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)" | craft min-pub guard-minimal)"
+raw_push "$published_minimal" "${ns_raw_path}/guard-minimal" 0.1.0
+local_minimal="$(printf 'annotations:\n%s\napiVersion: v2\nname: guard-minimal\nversion: 0.1.0\n' "$(stamps bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb)" | craft min-loc guard-minimal)"
+check "control: the same pair plus one real field compares identical" 10 "$local_minimal" "oci://${reg}/${ns_raw_path}" "identical: "
+
+# The exclusion may remove only the stamp lines. A stamp key with a multi-line value would take
+# more lines with it, so the check stops rather than compare what is left.
+fixture multiline '{ print } /^annotations:/ { print "  org.opencontainers.image.revision: |"; print "    first line"; print "    second line" }' Chart.yaml
+check "error: a stamp key with a multi-line value" error "$(package multiline)" "$ns" "would also remove"
+
+# The published package must be the chart and version it is published as.
+raw_push "$base_tgz" "${ns_raw_path}/guard-fixture" 0.2.0
+fixture v020 '{ sub(/^version: 0.1.0$/, "version: 0.2.0"); print }' Chart.yaml
+check "error: the artifact under a tag declares another version" error "$(package v020)" "oci://${reg}/${ns_raw_path}" "does not declare guard-fixture 0.2.0"
+
+# 7. The existence check errors: never "absent".
 python3 -I "$here/testdata/registry_stub.py" "$tmp/stub.port" &
 stub_pid=$!
 for _ in $(seq 1 50); do [ -s "$tmp/stub.port" ] && break; sleep 0.1; done
@@ -148,7 +205,7 @@ check "error: token endpoint refuses" error "$base_tgz" "oci://${stub}/denied" "
 check "error: the artifact is not a Helm chart" error "$base_tgz" "oci://${stub}/notchart" "is not a Helm chart"
 check "absent: stub answers NAME_UNKNOWN" 0 "$base_tgz" "oci://${stub}/other"
 
-# 7. Bad input.
+# 8. Bad input.
 check "error: not a package" error "$here/testdata/chart/values.yaml" "$ns"
 check "error: not an oci:// repo" error "$base_tgz" "https://${reg}/charts"
 

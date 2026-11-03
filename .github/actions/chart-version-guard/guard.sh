@@ -29,6 +29,15 @@
 #   - `generated:` in Chart.lock and requirements.lock (helm dependency update writes the time).
 # Everything else counts, appVersion included: it selects the image a release deploys.
 #
+# The exclusion is checked, not trusted, so it can never make the comparison vacuous:
+#   - it may remove only those lines. A file where it would remove anything else (a stamp key
+#     with a multi-line value, say) stops the check.
+#   - on each side, what is left must declare the chart's name and version, and must hold content
+#     beyond them: name and version are the lookup key, equal by construction, so comparing only
+#     them proves nothing. A package whose only content is the key plus the excluded fields stops
+#     the check instead of comparing "identical".
+# Stopping the check is the "could not check" verdict below, which a release treats as a failure.
+#
 # Registry access is the OCI distribution API, read-only: GET the manifest for the tag, then the
 # chart layer's blob. 200 means published. 404 means absent ONLY when the body carries the
 # registry error code MANIFEST_UNKNOWN or NAME_UNKNOWN. Any other answer (an auth refusal, a 5xx
@@ -227,18 +236,45 @@ strip_provenance='
   /^annotations:[ ]*$/ { inann = 1; hdr = $0; skip = 0; next }
   { print }
 '
-normalize() { # $1=dir
-  local f
+# The lines the exclusion may remove, as `diff` prints a removed line.
+removable_chart='^< (  "?org\.opencontainers\.image\.(revision|source|version|ref\.name)"?:.*|annotations:[ ]*)$'
+removable_lock='^< generated:.*$'
+
+normalize() { # $1=dir $2=which side, for messages
+  local f allowed extra
   while IFS= read -r -d '' f; do
     case "$(basename "$f")" in
-      Chart.yaml) awk "$strip_provenance" "$f" >"$f.norm" ;;
-      *) awk '!/^generated:/' "$f" >"$f.norm" ;;
+      Chart.yaml) awk "$strip_provenance" "$f" >"$f.norm"; allowed="$removable_chart" ;;
+      *) awk '!/^generated:/' "$f" >"$f.norm"; allowed="$removable_lock" ;;
     esac || fail "cannot normalize $f"
+    # Every line the exclusion removed must be one it is allowed to remove. diff prints change
+    # ranges (digits first) and removed lines ("<"); anything else would be an added line.
+    extra="$(diff "$f" "$f.norm" | grep -v '^[0-9]' | grep -Ev "$allowed" | head -n 3)"
+    [ -z "$extra" ] || fail "excluding the per-run fields from the $2 ${f#"$1"/} would also remove: ${extra}"
     mv "$f.norm" "$f" || fail "cannot normalize $f"
   done < <(find "$1" -type f \( -name Chart.yaml -o -name Chart.lock -o -name requirements.lock \) -print0)
 }
-normalize "$tmp/published"
-normalize "$tmp/local"
+
+# What is left to compare must be about this chart and must not be empty (see the header).
+assert_comparable() { # $1=chart dir $2=which side
+  local cy="$1/Chart.yaml" left
+  [ -f "$cy" ] || fail "the $2 has no Chart.yaml"
+  [ "$(yaml_scalar "$cy" name)" = "$name" ] && [ "$(yaml_scalar "$cy" version)" = "$version" ] ||
+    fail "the $2's Chart.yaml does not declare ${name} ${version} (it declares '$(yaml_scalar "$cy" name)' '$(yaml_scalar "$cy" version)')"
+  left="$(
+    {
+      grep -Ev '^(name|version):' "$cy"
+      find "$1" -type f ! -path "$cy" -size +0 -print
+    } | grep -c .
+  )"
+  [ "${left:-0}" -gt 0 ] ||
+    fail "nothing is left to compare in the $2 once the per-run fields are excluded: it holds only the chart's name and version, which are the lookup key"
+}
+
+normalize "$published_top" "published chart"
+normalize "$local_top" "package"
+assert_comparable "$published_top" "published chart"
+assert_comparable "$local_top" "package"
 
 # Compare the chart directories under one name, so the report shows chart-relative paths.
 mkdir "$tmp/cmp" && mv "$published_top" "$tmp/cmp/published" && mv "$local_top" "$tmp/cmp/package" ||
