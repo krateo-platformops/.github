@@ -20,4 +20,4 @@ runs:
         for t in curl jq tar awk diff; do
           command -v "$t" >/dev/null 2>&1 || { echo "::error::chart-version-guard needs '$t' on the runner"; exit 1; }
         done
-        echo "path=${GITHUB_ACTION_PATH}/guard.sh" >> "$GITHUB_OUTPUT"
+        echo "path=$(cd "${GITHUB_ACTION_PATH}" && pwd -P)/guard.sh" >> "$GITHUB_OUTPUT"

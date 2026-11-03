@@ -63,7 +63,7 @@ jobs:
       - name: Assert the reported path
         env:
           GUARD: ${{ steps.guard.outputs.path }}
-        run: test -f "$GUARD" && test "$GUARD" = "$GITHUB_WORKSPACE/.github/actions/chart-version-guard/guard.sh"
+        run: test -f "$GUARD" && test "$GUARD" -ef "$GITHUB_WORKSPACE/.github/actions/chart-version-guard/guard.sh"
       # The test reads the steps out of the workflow files with yq, which ubuntu-latest ships.
       - name: yq v4 is present
         run: yq --version | grep -q 'version v4\.'
