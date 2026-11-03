@@ -1,0 +1,148 @@
+# Reusable: on a chart repo's pull request, fail when a chart's version is already published with
+# different contents, which is exactly what release-oci.yaml would refuse at the next tag. One job
+# in a chart repo's PR CI buys the check:
+#
+#   chart-version-guard:
+#     uses: krateo-platformops/.github/.github/workflows/chart-version-guard.yaml@main
+#
+# Why: release-oci refuses to replace a published chart version (see its header), but a release
+# tag is a late place to learn that a merged chart changed without a version bump.
+# observability#87 proposed krateo-sse-proxy 0.1.18 with new contents after 0.1.18 was published.
+#
+# It checks the charts release-oci would publish (same discovery, same APP_VERSION substitution, same
+# dependency build) and runs the same guard on each (.github/actions/chart-version-guard/guard.sh):
+#   • version not published yet              → passes; the next release publishes it.
+#   • published with the same contents       → passes, with a note; the next release skips it.
+#   • published with DIFFERENT contents      → fails, naming the chart, the version and the files.
+#   • the registry could not be asked        → fails. "Could not check" is never "not published".
+# A chart whose version is the CHART_VERSION placeholder takes its version from the release tag, so
+# a new tag is always a new version; it is listed and not checked.
+name: chart-version-guard
+
+on:
+  workflow_call:
+    inputs:
+      oci_repo:
+        description: "OCI repo the charts are published to, as given to release-oci."
+        type: string
+        default: "oci://ghcr.io/krateo-platformops/charts"
+      chart_root:
+        description: "Directory to search for Chart.yaml files, as given to release-oci."
+        type: string
+        default: "."
+      app_version:
+        description: "Version substituted for APP_VERSION. Default: latest semver tag of the app repo, as release-oci resolves it."
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  chart-version-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Helm setup
+        uses: azure/setup-helm@v5.0.0
+        with:
+          version: v3.19.0
+
+      - name: Chart version guard
+        id: guard
+        uses: krateo-platformops/.github/.github/actions/chart-version-guard@main
+
+      - name: Check every chart version against the registry
+        env:
+          CHART_VERSION_GUARD: ${{ steps.guard.outputs.path }}
+          # The credentials release-oci pushes with: its run's GITHUB_TOKEN, for ghcr.io only.
+          REGISTRY_HOST: ghcr.io
+          REGISTRY_USERNAME: ${{ github.actor }}
+          REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          OCI_REPO: ${{ inputs.oci_repo }}
+          CHART_ROOT: ${{ inputs.chart_root }}
+          APP_VERSION_INPUT: ${{ inputs.app_version }}
+        run: |
+          set -euo pipefail
+          if [ ! -d "${CHART_ROOT:-.}" ]; then
+            echo "::error::chart_root '${CHART_ROOT}' is not a directory"; exit 1
+          fi
+
+          # APP_VERSION exactly as release-oci resolves it.
+          APP_VERSION="${APP_VERSION_INPUT:-}"
+          if [ -z "${APP_VERSION}" ]; then
+            APP_REPO="${GITHUB_REPOSITORY%-chart}"
+            APP_VERSION="$(gh api "repos/${APP_REPO}/tags" --paginate --jq '.[].name' 2>/dev/null \
+              | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)"
+          fi
+          echo "resolved: APP_VERSION=${APP_VERSION:-<none>}"
+
+          # Discovery: keep identical to release-oci.yaml's (and chart-images.yaml's).
+          charts=()
+          while IFS= read -r cf; do
+            d="$(dirname "$cf")"
+            parent="$(dirname "$d")"
+            if [ "$(basename "$parent")" = "charts" ] && [ -f "$(dirname "$parent")/Chart.yaml" ]; then
+              continue
+            fi
+            charts+=("$d")
+          done < <(find "${CHART_ROOT:-.}" -mindepth 1 \( -name .git -o -name node_modules -o -name examples -o -name example -o -name __fixtures__ -o -name fixtures -o -name testdata -o -name test -o -name tests -o -name docs \) -prune -o -name Chart.yaml -print | sort)
+          if [ "${#charts[@]}" -eq 0 ]; then
+            echo "no first-class charts found; nothing to check"; exit 0
+          fi
+
+          work="$(mktemp -d)"
+          new=(); same=(); by_tag=(); problems=()
+          for i in "${!charts[@]}"; do
+            d="${charts[$i]}"
+            declared="$(awk '/^version:/ { sub(/^version:[[:space:]]*/, ""); print; exit }' "${d}/Chart.yaml" | tr -d "\"' ")"
+            if [ "${declared}" = "CHART_VERSION" ]; then
+              echo "${d}: version is set by the release tag (CHART_VERSION), so every release is a new version; not checked"
+              by_tag+=("${d}")
+              continue
+            fi
+
+            # Package it as release-oci does, in place (relative file:// dependencies resolve the same
+            # way): APP_VERSION substituted, dependencies built. CHART_VERSION/SOURCE_REF are left
+            # alone: their value is the release tag, which a pull request does not have.
+            echo "::group::package ${d}"
+            if [ -n "${APP_VERSION}" ]; then
+              sed -i "s/APP_VERSION/${APP_VERSION}/g" "${d}/Chart.yaml"
+            fi
+            if grep -q '^dependencies:' "${d}/Chart.yaml"; then
+              helm dependency build "${d}" >/dev/null 2>&1 || helm dependency update "${d}" >/dev/null 2>&1 \
+                || echo "::warning::${d}: helm dependency build/update failed — packaging with what is vendored"
+            fi
+            out="$(helm package "${d}" -d "${work}/dist-${i}")"
+            tgz="${out##*: }"
+            echo "::endgroup::"
+
+            # A literal version whose Chart.yaml still uses the release tag would publish different
+            # contents under one version on every tag, which release-oci refuses from the second tag on.
+            # Read from the package, where helm has already dropped comments.
+            mkdir "${work}/x-${i}" && tar -xzf "${tgz}" -C "${work}/x-${i}"
+            if grep -qE 'CHART_VERSION|SOURCE_REF' "${work}/x-${i}"/*/Chart.yaml; then
+              echo "::error::${d}: version ${declared} is literal, but Chart.yaml uses CHART_VERSION or SOURCE_REF, whose value is the release tag. Every tag would then publish different contents as ${declared}. Use 'version: CHART_VERSION', or drop the placeholder."
+              problems+=("${d}")
+              continue
+            fi
+
+            rc=0
+            bash "${CHART_VERSION_GUARD}" "${tgz}" "${OCI_REPO}" || rc=$?
+            case "${rc}" in
+              0)  echo "${d}: ${declared} is not published yet; the next release publishes it"; new+=("${d}") ;;
+              10) echo "${d}: ${declared} is already published with identical contents; the next release skips it (bump the version to publish a change)"; same+=("${d}") ;;
+              11) echo "::error::${d}: version ${declared} is already published with different contents (files listed above). Bump 'version' in ${d}/Chart.yaml."; problems+=("${d}") ;;
+              *)  echo "::error::${d}: could not check ${declared} against ${OCI_REPO} (reason above). This check fails rather than guess."; problems+=("${d}") ;;
+            esac
+          done
+
+          echo "::notice::chart versions: ${#new[@]} new, ${#same[@]} already published and unchanged, ${#by_tag[@]} set by the release tag, ${#problems[@]} refused"
+          if [ "${#problems[@]}" -gt 0 ]; then
+            echo "::error::refused: ${problems[*]}"
+            exit 1
+          fi

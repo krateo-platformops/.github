@@ -1,0 +1,130 @@
+# NOT reusable: this repo's own CI for the chart version guard (.github/actions/chart-version-guard)
+# and the two workflows that run it, release-oci.yaml and chart-version-guard.yaml. A change to the
+# rule that decides whether a release may push, skip or must refuse would otherwise ship untested
+# to every chart repo in three orgs.
+#
+# Everything but the ghcr-read job runs against a throwaway registry:2 service container on
+# localhost. ghcr-read reads real ghcr.io and never writes to it: nothing here pushes to ghcr.io,
+# where a pushed package takes the org's default visibility, which is public.
+name: test-chart-version-guard
+
+on:
+  pull_request:
+    paths:
+      - ".github/actions/chart-version-guard/**"
+      - ".github/workflows/test-chart-version-guard.yaml"
+      - ".github/workflows/release-oci.yaml"
+      - ".github/workflows/chart-version-guard.yaml"
+  push:
+    branches: [main]
+    paths:
+      - ".github/actions/chart-version-guard/**"
+      - ".github/workflows/test-chart-version-guard.yaml"
+      - ".github/workflows/release-oci.yaml"
+      - ".github/workflows/chart-version-guard.yaml"
+
+permissions:
+  contents: read
+
+jobs:
+  # guard.sh's verdicts, with fixture charts packaged and pushed by helm, and a stub registry for
+  # the cases where the existence check errors.
+  guard-rules:
+    runs-on: ubuntu-latest
+    services:
+      registry:
+        image: registry:2.8.3
+        ports: ["5000:5000"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v5.0.0
+        with:
+          version: v3.19.0
+      - name: guard.sh pushes, skips and refuses as documented
+        env:
+          TEST_REGISTRY: localhost:5000
+        run: bash .github/actions/chart-version-guard/guard_test.sh
+
+  # The real release-oci push step and the real pull-request check step, read out of the workflow
+  # files and run against the registry, plus the action's own wiring.
+  workflows:
+    runs-on: ubuntu-latest
+    services:
+      registry:
+        image: registry:2.8.3
+        ports: ["5000:5000"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v5.0.0
+        with:
+          version: v3.19.0
+      - name: The action reports a runnable guard
+        id: guard
+        uses: ./.github/actions/chart-version-guard
+      - name: Assert the reported path
+        env:
+          GUARD: ${{ steps.guard.outputs.path }}
+        run: test -f "$GUARD" && test "$GUARD" -ef "$GITHUB_WORKSPACE/.github/actions/chart-version-guard/guard.sh"
+      # The test reads the steps out of the workflow files with yq, which ubuntu-latest ships.
+      - name: yq v4 is present
+        run: yq --version | grep -q 'version v4\.'
+      - name: release-oci and chart-version-guard push, skip and refuse as documented
+        env:
+          TEST_REGISTRY: localhost:5000
+        run: bash .github/actions/chart-version-guard/workflows_test.sh
+
+  # The guard against REAL ghcr.io, read-only, with the credentials release-oci gives it: the run's
+  # GITHUB_TOKEN for ghcr.io, here this repo's, with nothing more than packages: read. The charts are
+  # owned by another repo (observability), the stricter case: if this token can read them, a chart
+  # repo's own token can read its own. guard.sh comes from this checkout, not @main.
+  ghcr-read:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: observability at tag 3.1.33
+        uses: actions/checkout@v4
+        with:
+          repository: krateo-platformops/observability
+          ref: 818ce3baaf61dea88461dcfe5dfdb5e571f111a5 # tag 3.1.33, which published krateo-sse-proxy 0.1.19
+          path: observability
+          persist-credentials: false
+      - uses: azure/setup-helm@v5.0.0
+        with:
+          version: v3.19.0
+      # release-oci's login, verbatim, so this job holds the same credentials state as a release.
+      - name: Registry login
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: Published-identical, absent version, absent package
+        env:
+          REGISTRY_HOST: ghcr.io
+          REGISTRY_USERNAME: ${{ github.actor }}
+          REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          OCI_REPO: oci://ghcr.io/krateo-platformops/charts
+        run: |
+          set -euo pipefail
+          guard=.github/actions/chart-version-guard/guard.sh
+          work="$RUNNER_TEMP/ghcr"
+          expect() { # $1=case $2=want exit $3=chart dir
+            local out rc=0
+            out="$(helm package "$3" -d "$work/dist-$2")"
+            bash "$guard" "${out##*: }" "$OCI_REPO" || rc=$?
+            [ "$rc" = "$2" ] || { echo "::error::$1: guard exit ${rc}, want $2"; exit 1; }
+            echo "ok   $1"
+          }
+          mkdir -p "$work"
+          # krateo-sse-proxy has no dependencies, so nothing outside ghcr.io can fail this job.
+          expect "krateo-sse-proxy 0.1.19, packaged from tag 3.1.33, is published and identical" 10 observability/charts/krateo-sse-proxy
+
+          # The same package at a version never published: MANIFEST_UNKNOWN, read as absent.
+          cp -R observability/charts/krateo-sse-proxy "$work/absent-version"
+          sed -i 's/^version: .*/version: 0.0.0-chart-version-guard-never-published/' "$work/absent-version/Chart.yaml"
+          expect "an existing package at a never-published version is absent" 0 "$work/absent-version"
+
+          # A package that does not exist at all, as on a chart's first release. Anonymous pulls are
+          # refused for these (403); the token must be accepted to get "absent".
+          cp -R observability/charts/krateo-sse-proxy "$work/absent-package"
+          sed -i 's/^name: .*/name: chart-version-guard-never-published/' "$work/absent-package/Chart.yaml"
+          expect "a package that does not exist is absent" 0 "$work/absent-package"

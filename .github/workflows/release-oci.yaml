@@ -26,6 +26,28 @@
 # leaves CRDs at a version whose app chart does not exist. The job then fails naming what failed and
 # what was held back. Packaging still fails fast — nothing is pushed if any chart does not package.
 #
+# A published chart version is immutable. Before anything is pushed, every package is checked
+# against the registry by the chart-version-guard action (.github/actions/chart-version-guard):
+#   • not published                          → pushed.
+#   • published with the same contents       → not pushed ("skipped"); the published artifact,
+#                                              built by the commit that first released it, stays.
+#   • published with DIFFERENT contents      → the job fails and nothing is pushed. Bump the version.
+#   • the registry could not be asked        → the job fails and nothing is pushed. "Could not
+#                                              check" is never read as "not published".
+# The skip is a provenance guarantee, not tidiness. A published chart version's provenance (the
+# commit that BUILT it, as stamped into its org.opencontainers.image.* annotations) is only true if
+# that artifact is never re-pushed. Without the skip, every tag re-pushes every unchanged chart and
+# re-stamps it with the tag's commit, which did not build that version, and installer's pin-ci
+# would then vouch for the CI of the wrong commit. So provenance stamping must never run without
+# this skip in front of the push.
+#
+# Contents means the files in the package, not the .tgz bytes: `helm package` writes fresh mtimes,
+# so pushing an unchanged chart used to move its tag to a new digest on every release tag (seen on
+# observability 3.1.31/3.1.32). Per-run provenance annotations and Chart.lock's `generated` time do
+# not count either; guard.sh lists exactly what is ignored, checks that excluding them removes
+# nothing else, and refuses a comparison that excluding them would leave empty. A chart repo's
+# pull requests can run the same check through chart-version-guard.yaml.
+#
 # How versions are set (a chart opts in purely by which placeholders it authors):
 #   • CHART_VERSION → the release tag (or workflow_dispatch input)
 #   • SOURCE_REF    → the release tag           (federated agents pin their source to it)
@@ -81,6 +103,26 @@ jobs:
   package-and-push:
     needs: [verify-images]
     runs-on: ubuntu-latest
+    # One check-and-push at a time per repository. Without it, two releases of one repo that overlap,
+    # e.g. two tags pushed close together, or a tag and a workflow_dispatch, could both find a
+    # version absent and both push it: the second would silently replace the first, with different
+    # contents if their commits differ. Serialized, the second run's check sees the first's push.
+    #
+    # Scope: GitHub applies a group "in the repository" (workflow syntax, `concurrency`:
+    # https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#concurrency),
+    # and in a called workflow "the github context is always associated with the caller workflow"
+    # (https://docs.github.com/en/actions/reference/workflows-and-actions/reusing-workflow-configurations).
+    # The caller's repository is in the name anyway, so the scope does not rest on that reading:
+    # releases of different repos never wait for each other. The name must differ from any group a
+    # caller sets itself, or GitHub cancels the running caller (same page); no caller uses it.
+    #
+    # Not cancel-in-progress: a running release is never interrupted. But GitHub keeps at most one
+    # run pending per group, so a THIRD overlapping release cancels the pending second: that tag's
+    # release-oci run shows as cancelled, published nothing, and must be re-run. Nothing is ever
+    # published wrong.
+    concurrency:
+      group: release-oci-package-and-push-${{ github.repository }}
+      cancel-in-progress: false
     env:
       OCI_REPO: ${{ inputs.oci_repo }}
     steps:
@@ -145,6 +187,13 @@ jobs:
           echo "app_version=${APP_VERSION}" >> "$GITHUB_OUTPUT"
           echo "resolved: CHART_VERSION=${CHART_VERSION}  APP_VERSION=${APP_VERSION:-<none>}  (APP_REPO=${APP_REPO})"
 
+      # The check that keeps a published version from being replaced (see the header). An action
+      # rather than inline script, so this release and the PR-time chart-version-guard.yaml run the
+      # same code.
+      - name: Chart version guard
+        id: guard
+        uses: krateo-platformops/.github/.github/actions/chart-version-guard@main
+
       - name: Helm setup
         uses: azure/setup-helm@v5.0.0
         with:
@@ -155,6 +204,11 @@ jobs:
 
       - name: Discover, version, package & push every first-class chart
         env:
+          CHART_VERSION_GUARD: ${{ steps.guard.outputs.path }}
+          # The credentials the push uses: helm registry login ghcr.io with the run's GITHUB_TOKEN.
+          REGISTRY_HOST: ghcr.io
+          REGISTRY_USERNAME: ${{ github.actor }}
+          REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
           CHART_VERSION: ${{ steps.ver.outputs.chart_version }}
           APP_VERSION: ${{ steps.ver.outputs.app_version }}
           CHART_ROOT: ${{ inputs.chart_root }}
@@ -205,6 +259,34 @@ jobs:
             echo "::endgroup::"
           done
 
+          # Ask the registry about every package before pushing any (see the header). A refusal or a
+          # failed check stops the whole release, as a packaging failure does: a release that would
+          # rewrite a published version, or that could not find out, is not one to half-publish.
+          #
+          # The skip (exit 10) is what keeps provenance true: the published artifact, stamped by the
+          # commit that built this version, stays. Pushing this run's package instead would re-stamp
+          # an unchanged version with a commit that did not build it.
+          declare -A skip_of=()
+          refused=()
+          for d in "${charts[@]}"; do
+            tgz="${tgz_of[${d}]}"
+            echo "::group::guard $(basename "${tgz}")"
+            rc=0
+            bash "${CHART_VERSION_GUARD}" "${tgz}" "${OCI_REPO}" || rc=$?
+            case "${rc}" in
+              0)  ;;
+              10) skip_of["${d}"]=1
+                  echo "skipped: $(basename "${tgz}") is already published, contents identical; the published artifact stays" ;;
+              11) refused+=("$(basename "${tgz}") (published with different contents)") ;;
+              *)  refused+=("$(basename "${tgz}") (could not check the registry)") ;;
+            esac
+            echo "::endgroup::"
+          done
+          if [ "${#refused[@]}" -gt 0 ]; then
+            echo "::error::pushed nothing. Refused: ${refused[*]}"
+            exit 1
+          fi
+
           # Push every chart, app charts first, and fail at the end naming what did not publish. Stopping
           # at the first failure (alphabetical order) let one refused chart leave the rest unpublished;
           # pushing blindly would instead let `<x>-crds` publish at a version whose `<x>` never did.
@@ -212,6 +294,8 @@ jobs:
           failed=(); held=()
           push_chart() {
             local d="$1" tgz="${tgz_of[$1]}"
+            # Already published with these contents: it counts as published at this version.
+            if [ -n "${skip_of[${d}]:-}" ]; then ok_of["${d}"]=1; return; fi
             echo "Pushing ${tgz} -> ${OCI_REPO}"
             if helm push "${tgz}" "${OCI_REPO}"; then
               ok_of["${d}"]=1
@@ -237,3 +321,4 @@ jobs:
             echo "::error::published ${#ok_of[@]} of ${#charts[@]} chart(s); failed: ${failed[*]:-none}; held back: ${held[*]:-none}"
             exit 1
           fi
+          echo "done: pushed $(( ${#ok_of[@]} - ${#skip_of[@]} )), skipped ${#skip_of[@]} already published with identical contents, of ${#charts[@]} chart(s)"
