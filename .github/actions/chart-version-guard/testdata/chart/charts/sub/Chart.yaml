@@ -1,0 +1,5 @@
+apiVersion: v2
+name: sub
+description: Vendored subchart of the guard fixture
+type: application
+version: 0.1.0

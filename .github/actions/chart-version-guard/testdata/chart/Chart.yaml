@@ -1,0 +1,13 @@
+# Fixture for guard_test.sh: one first-class chart with a vendored subchart, an annotation of its
+# own, and a Chart.lock, so every normalization rule in guard.sh has something to act on.
+apiVersion: v2
+name: guard-fixture
+description: Fixture chart for the chart version guard tests
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+annotations:
+  krateo.io/category: fixture
+dependencies:
+  - name: sub
+    version: 0.1.0
