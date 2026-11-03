@@ -250,6 +250,14 @@ jobs:
             # and discards nothing else it cannot see — a comment does not survive being read back
             # out of the .tgz. Merged with yq rather than appended with sed so a chart that already
             # authors `annotations:` keeps its own keys, and so re-running is idempotent.
+            # THESE FOUR KEYS ARE A SHARED LIST. chart-version-guard compares a chart about to be
+            # pushed against the published one, and must ignore anything that changes per run or every
+            # re-release of an unchanged version would read as "different contents" and be refused. Its
+            # `strip_provenance` removes exactly these four keys and `removable_chart` is the allowlist
+            # of lines that removal may delete (.github/actions/chart-version-guard/guard.sh). Adding a
+            # key here without adding it there turns every such release into a refusal, on every caller
+            # at once, pointing at the guard rather than at this step. `created` is the trap: it is the
+            # most standard OCI annotation of all and it is a timestamp, so it would differ on every run.
             yq -i '
               .annotations."org.opencontainers.image.revision" = strenv(GIT_SHA) |
               .annotations."org.opencontainers.image.source"   = strenv(SRC_URL) |
