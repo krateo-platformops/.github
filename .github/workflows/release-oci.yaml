@@ -26,6 +26,20 @@
 # leaves CRDs at a version whose app chart does not exist. The job then fails naming what failed and
 # what was held back. Packaging still fails fast — nothing is pushed if any chart does not package.
 #
+# A published chart version is immutable. Before anything is pushed, every package is checked
+# against the registry by the chart-version-guard action (.github/actions/chart-version-guard):
+#   • not published                          → pushed.
+#   • published with the same contents       → not pushed ("skipped"); the published artifact,
+#                                              built by the commit that first released it, stays.
+#   • published with DIFFERENT contents      → the job fails and nothing is pushed. Bump the version.
+#   • the registry could not be asked        → the job fails and nothing is pushed. "Could not
+#                                              check" is never read as "not published".
+# Contents means the files in the package, not the .tgz bytes: `helm package` writes fresh mtimes,
+# so pushing an unchanged chart used to move its tag to a new digest on every release tag (seen on
+# observability 3.1.31/3.1.32). Per-run provenance annotations and Chart.lock's `generated` time do
+# not count either; guard.sh lists exactly what is ignored. A chart repo's pull requests can run the
+# same check through chart-version-guard.yaml.
+#
 # How versions are set (a chart opts in purely by which placeholders it authors):
 #   • CHART_VERSION → the release tag (or workflow_dispatch input)
 #   • SOURCE_REF    → the release tag           (federated agents pin their source to it)
@@ -145,6 +159,13 @@ jobs:
           echo "app_version=${APP_VERSION}" >> "$GITHUB_OUTPUT"
           echo "resolved: CHART_VERSION=${CHART_VERSION}  APP_VERSION=${APP_VERSION:-<none>}  (APP_REPO=${APP_REPO})"
 
+      # The check that keeps a published version from being replaced (see the header). An action
+      # rather than inline script, so this release and the PR-time chart-version-guard.yaml run the
+      # same code.
+      - name: Chart version guard
+        id: guard
+        uses: krateo-platformops/.github/.github/actions/chart-version-guard@main
+
       - name: Helm setup
         uses: azure/setup-helm@v5.0.0
         with:
@@ -155,6 +176,9 @@ jobs:
 
       - name: Discover, version, package & push every first-class chart
         env:
+          CHART_VERSION_GUARD: ${{ steps.guard.outputs.path }}
+          REGISTRY_USERNAME: ${{ github.actor }}
+          REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
           CHART_VERSION: ${{ steps.ver.outputs.chart_version }}
           APP_VERSION: ${{ steps.ver.outputs.app_version }}
           CHART_ROOT: ${{ inputs.chart_root }}
@@ -205,6 +229,30 @@ jobs:
             echo "::endgroup::"
           done
 
+          # Ask the registry about every package before pushing any (see the header). A refusal or a
+          # failed check stops the whole release, as a packaging failure does: a release that would
+          # rewrite a published version, or that could not find out, is not one to half-publish.
+          declare -A skip_of=()
+          refused=()
+          for d in "${charts[@]}"; do
+            tgz="${tgz_of[${d}]}"
+            echo "::group::guard $(basename "${tgz}")"
+            rc=0
+            bash "${CHART_VERSION_GUARD}" "${tgz}" "${OCI_REPO}" || rc=$?
+            case "${rc}" in
+              0)  ;;
+              10) skip_of["${d}"]=1
+                  echo "skipped: $(basename "${tgz}") is already published, contents identical; the published artifact stays" ;;
+              11) refused+=("$(basename "${tgz}") (published with different contents)") ;;
+              *)  refused+=("$(basename "${tgz}") (could not check the registry)") ;;
+            esac
+            echo "::endgroup::"
+          done
+          if [ "${#refused[@]}" -gt 0 ]; then
+            echo "::error::pushed nothing. Refused: ${refused[*]}"
+            exit 1
+          fi
+
           # Push every chart, app charts first, and fail at the end naming what did not publish. Stopping
           # at the first failure (alphabetical order) let one refused chart leave the rest unpublished;
           # pushing blindly would instead let `<x>-crds` publish at a version whose `<x>` never did.
@@ -212,6 +260,8 @@ jobs:
           failed=(); held=()
           push_chart() {
             local d="$1" tgz="${tgz_of[$1]}"
+            # Already published with these contents: it counts as published at this version.
+            if [ -n "${skip_of[${d}]:-}" ]; then ok_of["${d}"]=1; return; fi
             echo "Pushing ${tgz} -> ${OCI_REPO}"
             if helm push "${tgz}" "${OCI_REPO}"; then
               ok_of["${d}"]=1
@@ -237,3 +287,4 @@ jobs:
             echo "::error::published ${#ok_of[@]} of ${#charts[@]} chart(s); failed: ${failed[*]:-none}; held back: ${held[*]:-none}"
             exit 1
           fi
+          echo "done: pushed $(( ${#ok_of[@]} - ${#skip_of[@]} )), skipped ${#skip_of[@]} already published with identical contents, of ${#charts[@]} chart(s)"

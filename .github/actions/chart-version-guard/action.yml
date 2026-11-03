@@ -1,0 +1,23 @@
+name: chart-version-guard
+description: >-
+  Makes the chart version guard (guard.sh) available to a job and outputs its path. The guard
+  decides whether a packaged Helm chart may be pushed: not published → push; published with the
+  same contents → skip; published with different contents → refuse; registry could not be
+  asked → refuse. release-oci.yaml and chart-version-guard.yaml both run it, so release time and
+  pull-request time apply one rule. See guard.sh for the rule and its exit codes.
+outputs:
+  path:
+    description: "Absolute path of guard.sh. Run it as: bash \"$path\" <chart.tgz> <oci://host/path>"
+    value: ${{ steps.locate.outputs.path }}
+runs:
+  using: composite
+  steps:
+    # Fail here, naming the tool, rather than mid-release with a less obvious error.
+    - id: locate
+      shell: bash
+      run: |
+        set -euo pipefail
+        for t in curl jq tar awk diff; do
+          command -v "$t" >/dev/null 2>&1 || { echo "::error::chart-version-guard needs '$t' on the runner"; exit 1; }
+        done
+        echo "path=${GITHUB_ACTION_PATH}/guard.sh" >> "$GITHUB_OUTPUT"

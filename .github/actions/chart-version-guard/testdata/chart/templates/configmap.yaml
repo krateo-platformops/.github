@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-greeting
+data:
+  greeting: {{ .Values.greeting | quote }}
+  appVersion: {{ .Chart.AppVersion | quote }}

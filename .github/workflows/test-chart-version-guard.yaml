@@ -1,0 +1,73 @@
+# NOT reusable: this repo's own CI for the chart version guard (.github/actions/chart-version-guard)
+# and the two workflows that run it, release-oci.yaml and chart-version-guard.yaml. A change to the
+# rule that decides whether a release may push, skip or must refuse would otherwise ship untested
+# to every chart repo in three orgs.
+#
+# Everything runs against a throwaway registry:2 service container on localhost. Nothing here
+# touches ghcr.io: a package pushed there takes the org's default visibility, which is public.
+name: test-chart-version-guard
+
+on:
+  pull_request:
+    paths:
+      - ".github/actions/chart-version-guard/**"
+      - ".github/workflows/test-chart-version-guard.yaml"
+      - ".github/workflows/release-oci.yaml"
+      - ".github/workflows/chart-version-guard.yaml"
+  push:
+    branches: [main]
+    paths:
+      - ".github/actions/chart-version-guard/**"
+      - ".github/workflows/test-chart-version-guard.yaml"
+      - ".github/workflows/release-oci.yaml"
+      - ".github/workflows/chart-version-guard.yaml"
+
+permissions:
+  contents: read
+
+jobs:
+  # guard.sh's verdicts, with fixture charts packaged and pushed by helm, and a stub registry for
+  # the cases where the existence check errors.
+  guard-rules:
+    runs-on: ubuntu-latest
+    services:
+      registry:
+        image: registry:2.8.3
+        ports: ["5000:5000"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v5.0.0
+        with:
+          version: v3.19.0
+      - name: guard.sh pushes, skips and refuses as documented
+        env:
+          TEST_REGISTRY: localhost:5000
+        run: bash .github/actions/chart-version-guard/guard_test.sh
+
+  # The real release-oci push step and the real pull-request check step, read out of the workflow
+  # files and run against the registry, plus the action's own wiring.
+  workflows:
+    runs-on: ubuntu-latest
+    services:
+      registry:
+        image: registry:2.8.3
+        ports: ["5000:5000"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v5.0.0
+        with:
+          version: v3.19.0
+      - name: The action reports a runnable guard
+        id: guard
+        uses: ./.github/actions/chart-version-guard
+      - name: Assert the reported path
+        env:
+          GUARD: ${{ steps.guard.outputs.path }}
+        run: test -f "$GUARD" && test "$GUARD" = "$GITHUB_WORKSPACE/.github/actions/chart-version-guard/guard.sh"
+      # The test reads the steps out of the workflow files with yq, which ubuntu-latest ships.
+      - name: yq v4 is present
+        run: yq --version | grep -q 'version v4\.'
+      - name: release-oci and chart-version-guard push, skip and refuse as documented
+        env:
+          TEST_REGISTRY: localhost:5000
+        run: bash .github/actions/chart-version-guard/workflows_test.sh

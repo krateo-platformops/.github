@@ -12,7 +12,7 @@ behaviour there, not in a repository.
 
 Current shared workflows: `security.yml`, `release-notes.yaml`, `release-oci.yaml`,
 `lint-docs.yaml`, `preflight-refs.yaml`, `component-image-build.yaml`, `chart-images.yaml`,
-`component-go-checks.yaml`.
+`component-go-checks.yaml`, `chart-version-guard.yaml`.
 
 Two things about that repository are load-bearing:
 
