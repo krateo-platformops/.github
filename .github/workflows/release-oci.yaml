@@ -103,16 +103,25 @@ jobs:
   package-and-push:
     needs: [verify-images]
     runs-on: ubuntu-latest
-    # One check-and-push at a time per repository (concurrency groups are scoped to the repository
-    # the run belongs to, here the caller). Without it, two releases of one repo that overlap, e.g.
-    # two tags pushed close together, or a tag and a workflow_dispatch, could both find a version
-    # absent and both push it: the second would silently replace the first, with different
+    # One check-and-push at a time per repository. Without it, two releases of one repo that overlap,
+    # e.g. two tags pushed close together, or a tag and a workflow_dispatch, could both find a
+    # version absent and both push it: the second would silently replace the first, with different
     # contents if their commits differ. Serialized, the second run's check sees the first's push.
-    # Not cancel-in-progress: a release is never interrupted. GitHub keeps at most one run pending
-    # per group, so a third overlapping release cancels the pending second, which then shows as
-    # cancelled and is re-run; nothing is published wrong.
+    #
+    # Scope: GitHub applies a group "in the repository" (workflow syntax, `concurrency`:
+    # https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#concurrency),
+    # and in a called workflow "the github context is always associated with the caller workflow"
+    # (https://docs.github.com/en/actions/reference/workflows-and-actions/reusing-workflow-configurations).
+    # The caller's repository is in the name anyway, so the scope does not rest on that reading:
+    # releases of different repos never wait for each other. The name must differ from any group a
+    # caller sets itself, or GitHub cancels the running caller (same page); no caller uses it.
+    #
+    # Not cancel-in-progress: a running release is never interrupted. But GitHub keeps at most one
+    # run pending per group, so a THIRD overlapping release cancels the pending second: that tag's
+    # release-oci run shows as cancelled, published nothing, and must be re-run. Nothing is ever
+    # published wrong.
     concurrency:
-      group: release-oci-package-and-push
+      group: release-oci-package-and-push-${{ github.repository }}
       cancel-in-progress: false
     env:
       OCI_REPO: ${{ inputs.oci_repo }}
