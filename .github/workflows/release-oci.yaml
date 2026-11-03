@@ -103,6 +103,17 @@ jobs:
   package-and-push:
     needs: [verify-images]
     runs-on: ubuntu-latest
+    # One check-and-push at a time per repository (concurrency groups are scoped to the repository
+    # the run belongs to, here the caller). Without it, two releases of one repo that overlap, e.g.
+    # two tags pushed close together, or a tag and a workflow_dispatch, could both find a version
+    # absent and both push it: the second would silently replace the first, with different
+    # contents if their commits differ. Serialized, the second run's check sees the first's push.
+    # Not cancel-in-progress: a release is never interrupted. GitHub keeps at most one run pending
+    # per group, so a third overlapping release cancels the pending second, which then shows as
+    # cancelled and is re-run; nothing is published wrong.
+    concurrency:
+      group: release-oci-package-and-push
+      cancel-in-progress: false
     env:
       OCI_REPO: ${{ inputs.oci_repo }}
     steps:
@@ -185,6 +196,8 @@ jobs:
       - name: Discover, version, package & push every first-class chart
         env:
           CHART_VERSION_GUARD: ${{ steps.guard.outputs.path }}
+          # The credentials the push uses: helm registry login ghcr.io with the run's GITHUB_TOKEN.
+          REGISTRY_HOST: ghcr.io
           REGISTRY_USERNAME: ${{ github.actor }}
           REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
           CHART_VERSION: ${{ steps.ver.outputs.chart_version }}

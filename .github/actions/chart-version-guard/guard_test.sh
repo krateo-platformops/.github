@@ -205,6 +205,14 @@ check "error: token endpoint refuses" error "$base_tgz" "oci://${stub}/denied" "
 check "error: the artifact is not a Helm chart" error "$base_tgz" "oci://${stub}/notchart" "is not a Helm chart"
 check "absent: stub answers NAME_UNKNOWN" 0 "$base_tgz" "oci://${stub}/other"
 
+# Credentials go only to the host they are for, as helm's login is for one host.
+REGISTRY_HOST="$stub" REGISTRY_USERNAME=u REGISTRY_PASSWORD=p \
+  check "credentials for the repo's host are used" 0 "$base_tgz" "oci://${stub}/creds" "absent: "
+REGISTRY_HOST=ghcr.io REGISTRY_USERNAME=u REGISTRY_PASSWORD=p \
+  check "credentials for another host are not sent" error "$base_tgz" "oci://${stub}/creds" "answered HTTP 403"
+REGISTRY_USERNAME=u REGISTRY_PASSWORD=p \
+  check "error: credentials without the host they are for" error "$base_tgz" "oci://${stub}/creds" "without REGISTRY_HOST"
+
 # 8. Bad input.
 check "error: not a package" error "$here/testdata/chart/values.yaml" "$ns"
 check "error: not an oci:// repo" error "$base_tgz" "https://${reg}/charts"

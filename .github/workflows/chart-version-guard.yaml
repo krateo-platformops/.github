@@ -58,6 +58,8 @@ jobs:
       - name: Check every chart version against the registry
         env:
           CHART_VERSION_GUARD: ${{ steps.guard.outputs.path }}
+          # The credentials release-oci pushes with: its run's GITHUB_TOKEN, for ghcr.io only.
+          REGISTRY_HOST: ghcr.io
           REGISTRY_USERNAME: ${{ github.actor }}
           REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ github.token }}

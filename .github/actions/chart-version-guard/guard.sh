@@ -44,9 +44,12 @@
 # after curl's retries, a network error, a 404 that is not from a registry, an artifact that is
 # not a Helm chart, a digest that does not match) ends the check with a non-verdict exit status.
 #
-# Env: REGISTRY_USERNAME / REGISTRY_PASSWORD, optional. They are sent only to the registry's own
-#      host (for GHCR, that includes its token endpoint), never to a token realm or redirect
-#      elsewhere. Without them the requests are anonymous.
+# Env: REGISTRY_HOST / REGISTRY_USERNAME / REGISTRY_PASSWORD, optional. The credentials for the
+#      one registry host REGISTRY_HOST names: pass exactly what the push logs in with (release-oci:
+#      `helm registry login ghcr.io` with the run's GITHUB_TOKEN), so the check reads as the push
+#      writes. They are sent only when the OCI repo is on that host, and only to that host (for
+#      GHCR, that includes its token endpoint), never to a token realm or redirect elsewhere. For a
+#      repo on any other host the requests are anonymous, as the push's would be.
 #      The scheme is https, except plain http for a localhost registry, as helm does.
 #
 # Needs: bash, curl, jq, tar, awk, diff, and sha256sum or shasum.
@@ -125,6 +128,9 @@ cfg_quote() { local s="${1//\\/\\\\}"; s="${s//\"/\\\"}"; printf '"%s"' "$s"; }
 
 user="${REGISTRY_USERNAME:-}"
 pass="${REGISTRY_PASSWORD:-}"
+cred_host="${REGISTRY_HOST:-}"
+[ -z "$user" ] || [ -n "$cred_host" ] || fail "REGISTRY_USERNAME is set without REGISTRY_HOST, the host those credentials are for"
+[ "$host" = "$cred_host" ] || { user=""; pass=""; }
 auth="$tmp/auth.curlrc"
 (umask 077 && : >"$auth") || fail "cannot create $auth"
 
@@ -165,7 +171,7 @@ authenticate() {
       printf 'header = %s\n' "$(cfg_quote "Authorization: Bearer ${token}")" >"$auth"
       ;;
     [Bb]asic*)
-      [ -n "$user" ] || fail "the registry requires credentials and REGISTRY_USERNAME is not set"
+      [ -n "$user" ] || fail "the registry requires credentials and none are set for ${host}"
       printf 'user = %s\n' "$(cfg_quote "${user}:${pass}")" >"$auth"
       ;;
     *) fail "the registry answered 401 without a usable WWW-Authenticate challenge" ;;

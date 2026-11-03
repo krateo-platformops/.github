@@ -7,6 +7,8 @@ to <port-file>, and serves until killed. The first path segment after /v2/ picks
   /v2/html404/...   HTTP 404 with an HTML page: not a registry's "unknown manifest" answer
   /v2/denied/...    HTTP 401 with a Bearer challenge whose token endpoint answers 403
   /v2/notchart/...  HTTP 200 with a manifest that has no Helm chart layer (a container image)
+  /v2/creds/...     HTTP 401 with a Bearer challenge whose token endpoint issues a token only to
+                    a request carrying credentials; with that token, NAME_UNKNOWN (absent)
 """
 import http.server
 import json
@@ -29,6 +31,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         port = self.server.server_address[1]
+        if self.path.startswith("/token-creds"):
+            if self.headers.get("Authorization", "").startswith("Basic "):
+                return self.reply(200, json.dumps({"token": "stub-token"}))
+            return self.reply(403, json.dumps({"errors": [{"code": "DENIED", "message": "no credentials"}]}))
         if self.path.startswith("/token"):
             return self.reply(403, json.dumps({"errors": [{"code": "DENIED", "message": "denied"}]}))
         parts = self.path.split("/")
@@ -39,6 +45,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.reply(404, "<html><body>Not Found</body></html>", "text/html")
         if mode == "denied":
             challenge = f'Bearer realm="http://127.0.0.1:{port}/token",service="stub",scope="repository:denied:pull"'
+            return self.reply(401, json.dumps({"errors": [{"code": "UNAUTHORIZED"}]}),
+                              headers=[("WWW-Authenticate", challenge)])
+        if mode == "creds":
+            if self.headers.get("Authorization", "") == "Bearer stub-token":
+                return self.reply(404, json.dumps({"errors": [{"code": "NAME_UNKNOWN"}]}))
+            challenge = f'Bearer realm="http://127.0.0.1:{port}/token-creds",service="stub",scope="repository:creds:pull"'
             return self.reply(401, json.dumps({"errors": [{"code": "UNAUTHORIZED"}]}),
                               headers=[("WWW-Authenticate", challenge)])
         if mode == "notchart":
