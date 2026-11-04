@@ -75,8 +75,9 @@ fire at all.
 Each entry carries four fields:
 
 1. **The path** a clean rollout cannot reach.
-2. **Why** it cannot reach it. "No healthy rollout produces this state" is the claim being made, and
-   it should be checkable.
+2. **Why** it cannot reach it. "No healthy rollout produces this state" is the claim being made:
+   name the state and say why no healthy rollout reaches it, so the claim is falsifiable rather
+   than asserted.
 3. **The named instrument** that does verify it — a specific test, gate or procedure, not "unit
    tests".
 4. **What a green result from that instrument does not cover.**
@@ -111,9 +112,9 @@ real render, does not see comments at all.
 **A check satisfied by a true statement about the wrong subject.** This one is worse, because
 nothing looks anomalous. A convergence loop in the installer reported `CONVERGED` and exited 0 on a
 roll that had applied 7 of 37 releases and doubled the failure count. Its predicate was *"release
-count unchanged AND every CompositionDefinition Ready"*, and **both halves were true** —
-CompositionDefinition readiness is a property of the per-version controllers, not of whether
-any composition's release advanced.
+count unchanged AND every CompositionDefinition Ready"*, and **both halves were true** — but
+neither has the releases as its subject. CompositionDefinition readiness is a property of the
+per-version controllers, not of whether any composition's release advanced.
 
 The detail that makes it a pattern rather than a slip: that was the **second** fix to the same
 predicate. The first replaced *"count unchanged for three passes"* because it conflated "nothing
@@ -122,5 +123,14 @@ releases rather than the releases, so **the repair inherited the defect while lo
 cure**. The corrected predicate names the releases themselves: every release at the target chart
 version, none in a non-`deployed` state.
 
-A prose-satisfied check can be caught by a differential. A wrong-subject check can only be caught by
-asking what the predicate's subject is.
+**An explanation generated before the instrument was checked.** The narrowest of the three and the
+easiest to commit. While wrapping this section, a long-line check using `awk length` reported two
+overlong lines; `awk` counts bytes and the text contains em-dashes, so the report was annotated
+"awk counts bytes, em-dashes are three bytes each" — and then measurement in characters showed the
+line was genuinely too long. The account of the instrument's error was written before the
+instrument was shown to have erred, and it was wrong. A plausible mechanism offered for a reading
+you have not yet checked is a claim, not a caveat.
+
+A prose-satisfied check can be caught by a differential. A wrong-subject check can only be caught
+by asking what the predicate's subject is. A pre-written explanation can only be caught by
+measuring the thing it explains.
