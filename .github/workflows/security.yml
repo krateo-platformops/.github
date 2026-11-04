@@ -129,6 +129,9 @@ jobs:
             '''\.md$''',
             '''\.tpl$''',
             '''values\.schema\.json$''',
+            # helm-unittest suites: faked-cluster fixtures (kubernetesProvider) must declare Secret
+            # objects to exercise lookups, so they trip kubernetes-secret-yaml on fake values.
+            '''(^|/)tests/[^/]+_test\.ya?ml$''',
           ]
           [[allowlists]]
           description = "Well-known non-secret placeholder/example values"
