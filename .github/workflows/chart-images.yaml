@@ -144,8 +144,34 @@ jobs:
               echo "${name}: rendering at its declared floor ${floor} (kubeVersion: ${kv})"
             fi
 
+            # A chart whose DEFAULTS are not a valid configuration supplies the smallest one that
+            # is, in ci/*-values.yaml -- Helm's own convention, the one chart-testing reads. Without
+            # this, such a chart can NEVER publish: it "does not render", so its images are never
+            # checked, and the branch below correctly refuses to vouch for a chart it could not
+            # inspect. package-and-push is then skipped for the WHOLE repo, so one such chart takes
+            # every other chart's publish with it.
+            #
+            # That is not hypothetical. krateo-platformops/frontend 1.8.17 shipped an image and ZERO
+            # charts because helm/builder-gate fails on purpose when `.Values.instances` is empty --
+            # every object it ships sits inside `range .Values.instances`, so an install that forgets
+            # them rendered nothing and reported success, and the chart refuses that. It has carried
+            # a ci/render-values.yaml since that guard landed, and that repo's own lint.yaml already
+            # honours it; only this gate did not, so `lint` was green and `release-oci` was not.
+            #
+            # An `if` rather than `[ -f ... ] && ...`: under `set -euo pipefail` a top-level && list
+            # that evaluates false IS a failing command, so the && form would kill the step for every
+            # chart with no ci/ directory. An unmatched glob stays literal in bash, so the -f test is
+            # what skips it -- the same hazard class this file already documents for `floor`.
+            vals=()
+            for f in "$work/$name"/ci/*-values.yaml; do
+              if [ -f "$f" ]; then vals+=(-f "$f"); fi
+            done
+            if [ "${#vals[@]}" -gt 0 ]; then
+              echo "${name}: rendering with $(( ${#vals[@]} / 2 )) ci values file(s)"
+            fi
+
             rendered="$work/$name.rendered.yaml"
-            if ! helm template verify "$work/$name" "${kvargs[@]}" > "$rendered" 2> "$work/$name.err"; then
+            if ! helm template verify "$work/$name" "${kvargs[@]}" "${vals[@]}" > "$rendered" 2> "$work/$name.err"; then
               echo "::error::${name} did not render, so its images could NOT be checked. A release gate that cannot inspect a chart has not verified it. $(head -c 300 "$work/$name.err")"
               skipped+=("${name}")
             fi
