@@ -54,10 +54,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
+      - name: Repo's scoped Trivy exceptions (.trivyignore.yaml), if any
+        # A repo may scope an exception to specific files only with Trivy's YAML ignore format
+        # (`misconfigurations: [{id, paths, statement}]`); the plain `.trivyignore` Trivy reads by default
+        # can only silence a finding repo-wide. trivy-action reads YAML only when passed `trivyignores`
+        # and fails if the file is missing, so it is passed only when the repo has one. Repos without
+        # the file are unchanged. Not passed to the image scan below: that scans a built image's
+        # packages, never the repo's files these exceptions name.
+        id: trivyignore
+        run: if [ -f .trivyignore.yaml ]; then echo "file=.trivyignore.yaml" >> "$GITHUB_OUTPUT"; fi
       - name: Trivy (vuln + misconfig + secrets)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
+          trivyignores: ${{ steps.trivyignore.outputs.file }}
           scanners: vuln,secret,misconfig
           format: sarif
           output: trivy-fs.sarif
@@ -76,6 +86,7 @@ jobs:
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
+          trivyignores: ${{ steps.trivyignore.outputs.file }}
           scanners: vuln,secret        # gate on CRITICAL CVEs + secrets only; misconfig (KSV) stays
                                         # report-only in the step above (mostly example/dev manifests —
                                         # add misconfig here once those are cleaned/allowlisted)
