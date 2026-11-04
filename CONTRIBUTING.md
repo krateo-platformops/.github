@@ -100,7 +100,7 @@ It has all four fields: the `NotObserved` rollup path, why a healthy rollout nev
 envtest suite and its removal control as the instrument, and what a green run does not cover
 (envtest has no kubelet, scheduler or helm).
 
-### Two failure shapes worth naming
+### Four failure shapes worth naming
 
 **A check satisfied by prose about itself.** A gate that greps a file for a flag's name is satisfied
 by the comment above the flag, so deleting the guard and keeping the comment passes. One that
@@ -123,7 +123,18 @@ releases rather than the releases, so **the repair inherited the defect while lo
 cure**. The corrected predicate names the releases themselves: every release at the target chart
 version, none in a non-`deployed` state.
 
-**An explanation generated before the instrument was checked.** The narrowest of the three and the
+**A sample taken outside the window the claim is about.** A control dates the *instrument*;
+nothing dates the *sample* unless you say so. A chart's emission gate was suspected of pruning live
+objects at the instant of a version bump; the check offered against it was that the apiserver
+returned the same object at both the old and the new served version — a true measurement, with a
+working control, **taken seventeen minutes after the bump had created the new version**. The claim
+was about the bump instant and the sample was from a world where the thing in question had already
+happened. So: **name the window the claim covers, and show the measurement's timestamp falls inside
+it.** The same error has a premature form — a fetch taken while the release that publishes the
+artifact is still running, reported as `0 of 5` beside a `5 of 5` control, which reads as a finding
+because the control is sound.
+
+**An explanation generated before the instrument was checked.** The narrowest of the four and the
 easiest to commit. While wrapping this section, a long-line check using `awk length` reported two
 overlong lines; `awk` counts bytes and the text contains em-dashes, so the report was annotated
 "awk counts bytes, em-dashes are three bytes each" — and then measurement in characters showed the
@@ -132,5 +143,6 @@ instrument was shown to have erred, and it was wrong. A plausible mechanism offe
 you have not yet checked is a claim, not a caveat.
 
 A prose-satisfied check can be caught by a differential. A wrong-subject check can only be caught
-by asking what the predicate's subject is. A pre-written explanation can only be caught by
-measuring the thing it explains.
+by asking what the predicate's subject is. A mis-timed sample can only be caught by dating it
+against the window the claim covers. A pre-written explanation can only be caught by measuring the
+thing it explains.
