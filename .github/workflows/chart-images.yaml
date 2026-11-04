@@ -144,6 +144,31 @@ jobs:
               echo "${name}: rendering at its declared floor ${floor} (kubeVersion: ${kv})"
             fi
 
+            # RENDER WITH THE CHART'S OWN CI VALUES WHEN IT SHIPS THEM (Helm's `ci/*-values.yaml`
+            # convention, the one chart-testing reads).
+            #
+            # "Does it render with defaults" is the right question only when the defaults are a valid
+            # configuration. For a chart that deliberately REFUSES its defaults it is the wrong
+            # question, and the answer is "it must not". krateo-platformops/frontend's builder-gate is
+            # the case: every object it ships sits inside `range .Values.instances`, so an empty
+            # `instances` rendered zero objects while reporting success -- and the chart was given a
+            # `fail` guard precisely to stop that. The guard is right; rendering it bare is not.
+            #
+            # Before this, such a chart could not be inspected, the branch below counted it as skipped,
+            # and the whole release failed closed -- correctly, since a gate that cannot read a chart
+            # has not verified it, but for a reason the chart author had already answered. Frontend
+            # 1.8.17, 1.8.18 and 1.8.19 published their images and NO charts because of this, leaving
+            # the component pinnable at 1.8.16 only, with each tag looking released.
+            #
+            # Sorted so several files apply in a defined order, and `-f` repeats because helm merges
+            # them left to right. A chart with no `ci/` directory is unaffected: the glob matches
+            # nothing, the guard drops it, and the render is byte-identical to before.
+            for v in "$work/$name"/ci/*-values.yaml; do
+              [ -f "$v" ] || continue
+              kvargs+=(-f "$v")
+              echo "${name}: rendering with $(basename "$v")"
+            done
+
             rendered="$work/$name.rendered.yaml"
             if ! helm template verify "$work/$name" "${kvargs[@]}" > "$rendered" 2> "$work/$name.err"; then
               echo "::error::${name} did not render, so its images could NOT be checked. A release gate that cannot inspect a chart has not verified it. $(head -c 300 "$work/$name.err")"
