@@ -57,6 +57,23 @@
 #                     has no tags.
 # A chart with none of these placeholders keeps its own literally-pinned versions untouched.
 #
+# What a package carries: the chart, and, when the chart has one, its CompositionDefinition at
+# <name>/compositiondefinition.yaml, stamped with the version like Chart.yaml. "Has one" means a
+# compositiondefinition.yaml in the chart directory (a builder repository, whose chart is the
+# repository root) or in its parent (blueprints/<name>/ beside blueprints/<name>/chart/). The
+# krateo-blueprints helm index takes the archive GHCR holds, and it refuses a blueprint whose archive
+# does not register itself (krateo-blueprints/charts PUBLISHING.md, rules 1 and 3). Before anything
+# is pushed, the package must hold exactly one CompositionDefinition, installing
+# <oci_repo>/<name> at the package's version. A chart without a compositiondefinition.yaml in
+# either place is packaged as it always was. The logic is the guard action's ship-cd.sh, which the
+# pull-request check runs too.
+#
+# A version published before this existed has no compositiondefinition.yaml, so its re-release
+# would read as "different contents". The release then checks the package without the file. If that
+# is identical to what is published, the version is skipped and stays as published, without the
+# file: published versions are immutable, and the next version carries one. Any other difference
+# is refused as before.
+#
 # Collision guard: refuses to push unless OCI_REPO carries a chart-namespace path segment,
 # so a chart named e.g. `frontend` can never collide with a same-named container image at
 # the registry root. Universal, harmless for every repo.
@@ -244,6 +261,7 @@ jobs:
       - name: Discover, version, package & push every first-class chart
         env:
           CHART_VERSION_GUARD: ${{ steps.guard.outputs.path }}
+          SHIP_CD: ${{ steps.guard.outputs.ship_cd }}
           # The credentials the push uses: helm registry login ghcr.io with the run's GITHUB_TOKEN.
           REGISTRY_HOST: ghcr.io
           REGISTRY_USERNAME: ${{ github.actor }}
@@ -280,7 +298,10 @@ jobs:
           echo "First-class charts: ${charts[*]}"
 
           mkdir -p dist
+          # Outside the checkout: a chart at the repository root would otherwise package this too.
+          dist_without_cd="$(mktemp -d)"
           declare -A tgz_of=()
+          declare -A without_cd_of=()
           for d in "${charts[@]}"; do
             echo "::group::package ${d}"
             # Opt-in placeholder substitution (untouched if a placeholder is absent).
@@ -328,9 +349,33 @@ jobs:
               helm dependency build "${d}" >/dev/null 2>&1 || helm dependency update "${d}" >/dev/null 2>&1 \
                 || echo "::warning::${d}: helm dependency build/update failed — packaging with what is vendored"
             fi
+
+            # A chart with a CompositionDefinition ships it, stamped with this version (see "What a
+            # package carries" in the header). It is packaged without it first, for the guard only: a
+            # version published before this step existed has no compositiondefinition.yaml, and that
+            # package is what tells "published before the file shipped" apart from "changed without a
+            # bump". It is never pushed. A chart without one is packaged exactly as before.
+            cd_src="$(bash "${SHIP_CD}" source "${d}")"
+            if [ -n "${cd_src}" ]; then
+              hidden=""
+              if [ "${cd_src}" -ef "${d}/compositiondefinition.yaml" ]; then
+                hidden="$(mktemp)"
+                mv "${d}/compositiondefinition.yaml" "${hidden}"
+              fi
+              without="$(helm package "${d}" -d "${dist_without_cd}")"
+              without_cd_of["${d}"]="${without##*: }"
+              if [ -n "${hidden}" ]; then
+                mv "${hidden}" "${d}/compositiondefinition.yaml"
+              fi
+              bash "${SHIP_CD}" prepare "${d}" "${CHART_VERSION}"
+            fi
             out="$(helm package "${d}" -d dist/)"
             echo "${out}"
             tgz_of["${d}"]="${out##*: }"
+            # The package, not the copy: helm package succeeds whether or not the file made it in.
+            if [ -n "${cd_src}" ]; then
+              bash "${SHIP_CD}" verify "${tgz_of[${d}]}" "${OCI_REPO}"
+            fi
 
             # ASSERT THE STAMP SURVIVED. A step that silently does nothing is worse than no step:
             # every consumer would then read "no provenance" as "an old chart" forever, and the gate
@@ -366,11 +411,36 @@ jobs:
             tgz="${tgz_of[${d}]}"
             echo "::group::guard $(basename "${tgz}")"
             rc=0
-            bash "${CHART_VERSION_GUARD}" "${tgz}" "${OCI_REPO}" || rc=$?
+            before_cd=""
+            if [ -z "${without_cd_of[${d}]:-}" ]; then
+              bash "${CHART_VERSION_GUARD}" "${tgz}" "${OCI_REPO}" || rc=$?
+            else
+              # A version published before CompositionDefinitions shipped differs from this package by
+              # exactly that file. If the package without it is identical to what is published, the
+              # version is unchanged: skip it, and the published artifact stays, without the file,
+              # because a published version is immutable. Anything else is the guard's verdict on
+              # the package that would be pushed. Its output is held back until then, so a skip
+              # does not also print the guard's "different" error.
+              verdict="$(bash "${CHART_VERSION_GUARD}" "${tgz}" "${OCI_REPO}" 2>&1)" || rc=$?
+              if [ "${rc}" = 11 ]; then
+                rc_without=0
+                verdict_without="$(bash "${CHART_VERSION_GUARD}" "${without_cd_of[${d}]}" "${OCI_REPO}" 2>&1)" || rc_without=$?
+                if [ "${rc_without}" = 10 ]; then
+                  rc=10
+                  before_cd=yes
+                  verdict="${verdict_without}"
+                fi
+              fi
+              printf '%s\n' "${verdict}"
+            fi
             case "${rc}" in
               0)  ;;
               10) skip_of["${d}"]=1
-                  echo "skipped: $(basename "${tgz}") is already published, contents identical; the published artifact stays" ;;
+                  if [ -n "${before_cd}" ]; then
+                    echo "::notice::skipped: $(basename "${tgz}") was published before release-oci shipped CompositionDefinitions. It is identical to this package without compositiondefinition.yaml, so the published artifact stays, without one. The next version carries it."
+                  else
+                    echo "skipped: $(basename "${tgz}") is already published, contents identical; the published artifact stays"
+                  fi ;;
               11) refused+=("$(basename "${tgz}") (published with different contents)") ;;
               *)  refused+=("$(basename "${tgz}") (could not check the registry)") ;;
             esac

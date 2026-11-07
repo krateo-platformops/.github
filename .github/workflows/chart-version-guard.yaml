@@ -10,9 +10,16 @@
 # observability#87 proposed krateo-sse-proxy 0.1.18 with new contents after 0.1.18 was published.
 #
 # It checks the charts release-oci would publish (same discovery, same APP_VERSION substitution, same
-# dependency build) and runs the same guard on each (.github/actions/chart-version-guard/guard.sh):
+# dependency build, the same CompositionDefinition in the package via ship-cd.sh) and runs the same
+# guard on each (.github/actions/chart-version-guard/guard.sh):
 #   • version not published yet              → passes; the next release publishes it.
-#   • published with the same contents       → passes, with a note; the next release skips it.
+#   • published with the same contents       → passes, with a note; the next release skips it. That
+#                                              includes a version published before release-oci
+#                                              shipped CompositionDefinitions, which is the same
+#                                              package without compositiondefinition.yaml.
+#   • a CompositionDefinition that the package
+#     would carry installs another chart or
+#     another version                        → fails, as release-oci would refuse it.
 #   • published with DIFFERENT contents      → fails, naming the chart, the version and the files.
 #   • the registry could not be asked        → fails. "Could not check" is never "not published".
 # A chart whose version is the CHART_VERSION placeholder takes its version from the release tag, so
@@ -58,6 +65,7 @@ jobs:
       - name: Check every chart version against the registry
         env:
           CHART_VERSION_GUARD: ${{ steps.guard.outputs.path }}
+          SHIP_CD: ${{ steps.guard.outputs.ship_cd }}
           # The credentials release-oci pushes with: its run's GITHUB_TOKEN, for ghcr.io only.
           REGISTRY_HOST: ghcr.io
           REGISTRY_USERNAME: ${{ github.actor }}
@@ -117,9 +125,33 @@ jobs:
               helm dependency build "${d}" >/dev/null 2>&1 || helm dependency update "${d}" >/dev/null 2>&1 \
                 || echo "::warning::${d}: helm dependency build/update failed — packaging with what is vendored"
             fi
+            # The CompositionDefinition as release-oci ships it, and the package without it, which is
+            # what a version published before release-oci shipped one holds. No version is stamped: a
+            # pull request has no release tag, and a literal-version chart's CompositionDefinition
+            # must already name that version.
+            cd_src="$(bash "${SHIP_CD}" source "${d}")"
+            without=""
+            if [ -n "${cd_src}" ]; then
+              hidden=""
+              if [ "${cd_src}" -ef "${d}/compositiondefinition.yaml" ]; then
+                hidden="$(mktemp)"
+                mv "${d}/compositiondefinition.yaml" "${hidden}"
+              fi
+              without="$(helm package "${d}" -d "${work}/without-cd-${i}")"
+              without="${without##*: }"
+              if [ -n "${hidden}" ]; then
+                mv "${hidden}" "${d}/compositiondefinition.yaml"
+              fi
+              bash "${SHIP_CD}" prepare "${d}"
+            fi
             out="$(helm package "${d}" -d "${work}/dist-${i}")"
             tgz="${out##*: }"
             echo "::endgroup::"
+            if [ -n "${cd_src}" ] && ! bash "${SHIP_CD}" verify "${tgz}" "${OCI_REPO}"; then
+              echo "::error::${d}: release-oci would refuse this package (reason above)."
+              problems+=("${d}")
+              continue
+            fi
 
             # A literal version whose Chart.yaml still uses the release tag would publish different
             # contents under one version on every tag, which release-oci refuses from the second tag on.
@@ -132,10 +164,32 @@ jobs:
             fi
 
             rc=0
-            bash "${CHART_VERSION_GUARD}" "${tgz}" "${OCI_REPO}" || rc=$?
+            before_cd=""
+            if [ -z "${without}" ]; then
+              bash "${CHART_VERSION_GUARD}" "${tgz}" "${OCI_REPO}" || rc=$?
+            else
+              # As release-oci decides it: identical without the file means published before the file
+              # shipped, and unchanged.
+              verdict="$(bash "${CHART_VERSION_GUARD}" "${tgz}" "${OCI_REPO}" 2>&1)" || rc=$?
+              if [ "${rc}" = 11 ]; then
+                rc_without=0
+                verdict_without="$(bash "${CHART_VERSION_GUARD}" "${without}" "${OCI_REPO}" 2>&1)" || rc_without=$?
+                if [ "${rc_without}" = 10 ]; then
+                  rc=10
+                  before_cd=yes
+                  verdict="${verdict_without}"
+                fi
+              fi
+              printf '%s\n' "${verdict}"
+            fi
             case "${rc}" in
               0)  echo "${d}: ${declared} is not published yet; the next release publishes it"; new+=("${d}") ;;
-              10) echo "${d}: ${declared} is already published with identical contents; the next release skips it (bump the version to publish a change)"; same+=("${d}") ;;
+              10) if [ -n "${before_cd}" ]; then
+                    echo "${d}: ${declared} was published before release-oci shipped CompositionDefinitions and is otherwise unchanged; the next release skips it, and the published version stays without one"
+                  else
+                    echo "${d}: ${declared} is already published with identical contents; the next release skips it (bump the version to publish a change)"
+                  fi
+                  same+=("${d}") ;;
               11) echo "::error::${d}: version ${declared} is already published with different contents (files listed above). Bump 'version' in ${d}/Chart.yaml."; problems+=("${d}") ;;
               *)  echo "::error::${d}: could not check ${declared} against ${OCI_REPO} (reason above). This check fails rather than guess."; problems+=("${d}") ;;
             esac
