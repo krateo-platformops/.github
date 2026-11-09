@@ -4,11 +4,15 @@ description: >-
   decides whether a packaged Helm chart may be pushed: not published → push; published with the
   same contents → skip; published with different contents → refuse; registry could not be
   asked → refuse. release-oci.yaml and chart-version-guard.yaml both run it, so release time and
-  pull-request time apply one rule. See guard.sh for the rule and its exit codes.
+  pull-request time apply one rule. See guard.sh for the rule and its exit codes. It also provides
+  ship-cd.sh, which puts a chart's CompositionDefinition in its package the same way in both.
 outputs:
   path:
     description: "Absolute path of guard.sh. Run it as: bash \"$path\" <chart.tgz> <oci://host/path>"
     value: ${{ steps.locate.outputs.path }}
+  ship_cd:
+    description: "Absolute path of ship-cd.sh (source | prepare | verify). See its header."
+    value: ${{ steps.locate.outputs.ship_cd }}
 runs:
   using: composite
   steps:
@@ -20,4 +24,6 @@ runs:
         for t in curl jq tar awk diff; do
           command -v "$t" >/dev/null 2>&1 || { echo "::error::chart-version-guard needs '$t' on the runner"; exit 1; }
         done
-        echo "path=$(cd "${GITHUB_ACTION_PATH}" && pwd -P)/guard.sh" >> "$GITHUB_OUTPUT"
+        here="$(cd "${GITHUB_ACTION_PATH}" && pwd -P)"
+        echo "path=${here}/guard.sh" >> "$GITHUB_OUTPUT"
+        echo "ship_cd=${here}/ship-cd.sh" >> "$GITHUB_OUTPUT"
