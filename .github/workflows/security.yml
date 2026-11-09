@@ -93,16 +93,31 @@ jobs:
           severity: CRITICAL
           ignore-unfixed: true
           exit-code: "1"
-      - name: Gitleaks (secret scan)
-        # gitleaks-action@v2 charges ORG-owned repos; the gitleaks TOOL is MIT/free. Install the binary
-        # and scan in GIT mode (commit history). NOTE: --no-git wrongly scans .git/ pack files as plain
-        # data (slow + false positives); git mode on the runner-owned checkout is correct + fast.
+      # gitleaks-action@v2 charges ORG-owned repos; the gitleaks TOOL is MIT/free. Install the binary
+      # and scan in GIT mode (commit history). NOTE: --no-git wrongly scans .git/ pack files as plain
+      # data (slow + false positives); git mode on the runner-owned checkout is correct + fast.
+      - name: Gitleaks version (latest release, else v8.30.1)
+        id: gitleaks-ver
+        env: { GH_TOKEN: "${{ github.token }}" }
         run: |
-          ver="$(curl -fsSL -H "Authorization: Bearer ${{ github.token }}" \
-                  https://api.github.com/repos/gitleaks/gitleaks/releases/latest \
-                  | grep -oE '"tag_name": *"v[0-9.]+"' | grep -oE 'v[0-9.]+' | head -1)"
-          ver="${ver:-v8.30.1}"; v="${ver#v}"
-          curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/${ver}/gitleaks_${v}_linux_x64.tar.gz" | tar -xz gitleaks
+          ver="$(gh release view --repo gitleaks/gitleaks --json tagName -q .tagName 2>/dev/null || true)"
+          case "$ver" in v[0-9]*.[0-9]*.[0-9]*) ;; *) ver=v8.30.1 ;; esac
+          echo "tag=$ver" >> "$GITHUB_OUTPUT"
+          echo "version=${ver#v}" >> "$GITHUB_OUTPUT"
+      # Downloaded with the job's token and retried on transient errors only, then checked against
+      # the release's sha256 file: anonymous downloads 504ed under GitHub's 2026-11-09 incident and
+      # failed this job in authn and installer until re-run by hand.
+      - name: Download gitleaks
+        id: gitleaks-dl
+        uses: krateo-platformops/.github/.github/actions/release-download@main
+        with:
+          repo: gitleaks/gitleaks
+          tag: ${{ steps.gitleaks-ver.outputs.tag }}
+          asset: gitleaks_${{ steps.gitleaks-ver.outputs.version }}_linux_x64.tar.gz
+          checksums: gitleaks_${{ steps.gitleaks-ver.outputs.version }}_checksums.txt
+      - name: Gitleaks (secret scan)
+        run: |
+          tar -xzf "${{ steps.gitleaks-dl.outputs.path }}" gitleaks
           # Shared allowlist: documentation, generated API specs, vendored subcharts, sample
           # manifests, Helm template partials and JSON schemas are not secret stores; they trip
           # the generic-api-key / entropy heuristics on example identifiers and template syntax.
@@ -311,9 +326,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # syft is installed here rather than by anchore/sbom-action, which downloads it anonymously
+      # with no retry and so failed this job under GitHub's 2026-11-09 incident. Same tool and
+      # version the action used (v1.42.3), fetched with the job's token, retried on transient
+      # errors only, and checked against the release's sha256 file.
+      - name: Download syft
+        id: syft
+        uses: krateo-platformops/.github/.github/actions/release-download@main
+        with:
+          repo: anchore/syft
+          tag: v1.42.3
+          asset: syft_1.42.3_linux_amd64.tar.gz
+          checksums: syft_1.42.3_checksums.txt
       - name: Generate SBOM (SPDX)
-        uses: anchore/sbom-action@v0
-        with: { path: ".", format: spdx-json, output-file: sbom.spdx.json }
+        run: |
+          tar -xzf "${{ steps.syft.outputs.path }}" -C "$RUNNER_TEMP" syft
+          "$RUNNER_TEMP/syft" scan dir:. -o spdx-json=sbom.spdx.json
       - uses: actions/upload-artifact@v4
         with: { name: sbom, path: sbom.spdx.json }
       - name: Trivy image scan (optional)

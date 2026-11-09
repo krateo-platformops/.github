@@ -1,0 +1,63 @@
+# NOT reusable: this repo's own CI for the release-download action (.github/actions/release-download).
+# Every other file here is a workflow_call shared by the org; this one only tests the action that
+# security.yml uses, so a change to its retry or checksum rules cannot ship untested to every repo.
+name: test-release-download
+
+on:
+  pull_request:
+    paths: [".github/actions/release-download/**", ".github/workflows/test-release-download.yaml"]
+  push:
+    branches: [main]
+    paths: [".github/actions/release-download/**", ".github/workflows/test-release-download.yaml"]
+
+permissions:
+  contents: read
+
+jobs:
+  retry-rules:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: download.sh retries transient errors only and refuses unverified assets
+        run: bash .github/actions/release-download/download_test.sh
+
+  # Exercises action.yml itself (inputs, token, output path) from this checkout, in both
+  # directions: the two real assets security.yml uses download and verify, and an asset the release
+  # doesn't have still fails the step.
+  action-wiring:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: gitleaks, as security.yml's filesystem job fetches it
+        id: gitleaks
+        uses: ./.github/actions/release-download
+        with:
+          repo: gitleaks/gitleaks
+          tag: v8.30.1
+          asset: gitleaks_8.30.1_linux_x64.tar.gz
+          checksums: gitleaks_8.30.1_checksums.txt
+      - name: syft, as security.yml's sbom job fetches it
+        id: syft
+        uses: ./.github/actions/release-download
+        with:
+          repo: anchore/syft
+          tag: v1.42.3
+          asset: syft_1.42.3_linux_amd64.tar.gz
+          checksums: syft_1.42.3_checksums.txt
+      - name: Both binaries run
+        run: |
+          tar -xzf "${{ steps.gitleaks.outputs.path }}" -C "$RUNNER_TEMP" gitleaks
+          tar -xzf "${{ steps.syft.outputs.path }}" -C "$RUNNER_TEMP" syft
+          "$RUNNER_TEMP/gitleaks" version
+          "$RUNNER_TEMP/syft" version
+      - name: An asset the release doesn't have is not retried and fails the step
+        id: missing
+        continue-on-error: true
+        uses: ./.github/actions/release-download
+        with:
+          repo: gitleaks/gitleaks
+          tag: v8.30.1
+          asset: gitleaks_8.30.1_plan9_x64.tar.gz
+          checksums: gitleaks_8.30.1_checksums.txt
+      - name: Assert that it failed
+        run: test "${{ steps.missing.outcome }}" = failure
