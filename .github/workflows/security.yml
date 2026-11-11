@@ -155,6 +155,12 @@ jobs:
             '''REPLACE_WITH_[A-Z0-9_]+''',
             '''(?i)changeme|example|placeholder|dummy|redacted|your[-_]?(key|token|secret|password)''',
             '''dGhpcnR5X3R3b19ieXRl[A-Za-z0-9+/=]*''',
+            # OTLP/JSON attribute NAMES. Every attribute is written {"key":"<name>","value":...},
+            # so a long dotted name (a2a.response.outcome, gen_ai.usage.input_tokens) trips
+            # generic-api-key on the word `key`. Only lowercase dotted identifiers match (the
+            # semantic-conventions shape), never a credential's; a secret VALUE next to it is still
+            # scanned (krateo-platformops/observability#155, Diego 2026-11-11).
+            '''key"\s*:\s*"[a-z][a-z0-9_]*(\.[a-z0-9_]+)+"''',
           ]
           TOML
           # --redact keeps the secret out of the log and must stay. But on its own the job prints
