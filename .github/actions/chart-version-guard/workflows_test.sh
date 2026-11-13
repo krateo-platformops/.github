@@ -80,7 +80,7 @@ run_step() { # $1=script $2=fixture repo; env passed through. Sets $rc, $log.
 }
 release() { # $1=fixture repo; uses $OCI, $CV, $AV, $SHA
   CHART_VERSION="$CV" APP_VERSION="$AV" CHART_ROOT=. OCI_REPO="$OCI" \
-    CHART_VERSION_GUARD="$here/guard.sh" REGISTRY_HOST=ghcr.io REGISTRY_USERNAME="" REGISTRY_PASSWORD="" \
+    CHART_VERSION_GUARD="$here/guard.sh" CHART_PUSH="$root/.github/actions/chart-push/push.sh" REGISTRY_HOST=ghcr.io REGISTRY_USERNAME="" REGISTRY_PASSWORD="" \
     GIT_SHA="$SHA" SRC_URL="https://github.com/krateo-platformops/fixture" SRC_REF="$CV" \
     run_step "$tmp/release.sh" "$1"
 }

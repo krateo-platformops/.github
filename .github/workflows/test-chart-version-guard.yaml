@@ -12,6 +12,7 @@ on:
   pull_request:
     paths:
       - ".github/actions/chart-version-guard/**"
+      - ".github/actions/chart-push/**"
       - ".github/workflows/test-chart-version-guard.yaml"
       - ".github/workflows/release-oci.yaml"
       - ".github/workflows/chart-version-guard.yaml"
@@ -19,6 +20,7 @@ on:
     branches: [main]
     paths:
       - ".github/actions/chart-version-guard/**"
+      - ".github/actions/chart-push/**"
       - ".github/workflows/test-chart-version-guard.yaml"
       - ".github/workflows/release-oci.yaml"
       - ".github/workflows/chart-version-guard.yaml"

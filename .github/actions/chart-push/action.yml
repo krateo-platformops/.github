@@ -1,0 +1,19 @@
+name: chart-push
+description: >-
+  Makes the chart push (push.sh) available to a job and outputs its path. push.sh runs `helm push`
+  and retries only ghcr.io's transient "failed to perform Tag ... not found" after an accepted
+  upload; every other failure fails on the first attempt. release-oci.yaml pushes every chart
+  through it. See push.sh for the matched error and the incidents behind it.
+outputs:
+  path:
+    description: "Absolute path of push.sh. Run it as: bash \"$path\" <chart.tgz> <oci://host/path>"
+    value: ${{ steps.locate.outputs.path }}
+runs:
+  using: composite
+  steps:
+    - id: locate
+      shell: bash
+      run: |
+        set -euo pipefail
+        command -v helm >/dev/null 2>&1 || { echo "::error::chart-push needs helm on the runner (set it up before this step)"; exit 1; }
+        echo "path=$(cd "${GITHUB_ACTION_PATH}" && pwd -P)/push.sh" >> "$GITHUB_OUTPUT"
