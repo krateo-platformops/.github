@@ -241,9 +241,16 @@ jobs:
       - name: Registry login
         run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
 
+      # `helm push` with a bounded retry of ghcr.io's transient "failed to perform Tag ... not found"
+      # after an accepted upload, and of nothing else (see .github/actions/chart-push/push.sh).
+      - name: Chart push
+        id: push
+        uses: krateo-platformops/.github/.github/actions/chart-push@main
+
       - name: Discover, version, package & push every first-class chart
         env:
           CHART_VERSION_GUARD: ${{ steps.guard.outputs.path }}
+          CHART_PUSH: ${{ steps.push.outputs.path }}
           # The credentials the push uses: helm registry login ghcr.io with the run's GITHUB_TOKEN.
           REGISTRY_HOST: ghcr.io
           REGISTRY_USERNAME: ${{ github.actor }}
@@ -391,7 +398,7 @@ jobs:
             # Already published with these contents: it counts as published at this version.
             if [ -n "${skip_of[${d}]:-}" ]; then ok_of["${d}"]=1; return; fi
             echo "Pushing ${tgz} -> ${OCI_REPO}"
-            if helm push "${tgz}" "${OCI_REPO}"; then
+            if bash "${CHART_PUSH}" "${tgz}" "${OCI_REPO}"; then
               ok_of["${d}"]=1
             else
               echo "::error::push failed: ${tgz}"

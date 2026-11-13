@@ -1,0 +1,37 @@
+# NOT reusable: this repo's own CI for the chart push (.github/actions/chart-push), which every
+# chart repo's release-oci pushes through. A change to what it retries would otherwise ship untested
+# to every chart repo. The release-oci step that calls it is exercised end to end, against a
+# registry:2, by test-chart-version-guard.yaml's workflows job.
+name: test-chart-push
+
+on:
+  pull_request:
+    paths:
+      - ".github/actions/chart-push/**"
+      - ".github/workflows/test-chart-push.yaml"
+  push:
+    branches: [main]
+    paths:
+      - ".github/actions/chart-push/**"
+      - ".github/workflows/test-chart-push.yaml"
+
+permissions:
+  contents: read
+
+jobs:
+  push-rules:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v5.0.0
+        with:
+          version: v3.19.0
+      - name: push.sh retries only the transient tag failure, as documented
+        run: bash .github/actions/chart-push/push_test.sh
+      - name: The action reports a runnable push
+        id: push
+        uses: ./.github/actions/chart-push
+      - name: Assert the reported path
+        env:
+          PUSH: ${{ steps.push.outputs.path }}
+        run: test -f "$PUSH" && test "$PUSH" -ef "$GITHUB_WORKSPACE/.github/actions/chart-push/push.sh"
