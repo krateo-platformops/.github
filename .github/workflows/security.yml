@@ -192,6 +192,26 @@ jobs:
           regexes = [
             '''^\s*const secret = "eyJ[A-Za-z0-9_-]{17}\.[A-Za-z0-9_-]{11}\.[A-Za-z0-9_-]{3}"\s*$''',
           ]
+          [[allowlists]]
+          description = "OpenStack-Helm's published libvirt secret UUID"
+          # The UUID that names the libvirt secret every hypervisor defines for Ceph (cinder's rbd_secret_uuid,
+          # libvirt's and nova's secret_uuid, the umbrella's libvirtSecretUUID in
+          # krateo-blueprints/krateo-openstack-blueprint). It is an identifier, published in OpenStack-Helm's
+          # cinder, nova and libvirt values; the secret's VALUE is a cephx key, which is never in values (#308).
+          # Scoped to those four values files AND those keys AND that exact UUID: a different UUID under these
+          # keys, or this UUID under any other key or in any other file, is still scanned. Tested with gitleaks
+          # 8.30.1 in git mode, as this job scans (`gitleaks dir` skips a whole file on an AND allowlist's path
+          # alone, so it cannot test this): the finding clears across every ref of a fresh clone; another UUID
+          # under libvirtSecretUUID, a high-entropy key elsewhere in the same file, this UUID under another key,
+          # and this line in another chart are still caught (Diego 2026-11-18, #308).
+          condition = "AND"
+          regexTarget = "line"
+          paths = [
+            '''(^|/)blueprints/(openstack|cinder|nova|libvirt)/chart/values\.yaml$''',
+          ]
+          regexes = [
+            '''^\s*(libvirtSecretUUID|rbd_secret_uuid|secret_uuid):\s*"?457eb676-33da-42ec-9a8c-9293d545c337"?\s*$''',
+          ]
           TOML
           # --redact keeps the secret out of the log and must stay. But on its own the job prints
           # "leaks found: N" and nothing else -- not the rule, the file, or the fingerprint -- so a
