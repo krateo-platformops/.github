@@ -262,9 +262,13 @@ jobs:
       # upload: once the registry serves that digest, the same archive is pushed again and must land on
       # the same digest (see .github/actions/chart-push/push.sh). Locate mode: no inputs, so the step
       # below runs push.sh once per chart, with REGISTRY_USERNAME/REGISTRY_PASSWORD for its read-back.
+      # Pinned by commit (krateo-blueprints/charts PUBLISHING.md rules 9 and 14): `@main` let any push to this
+      # repository's main change how every caller's charts are pushed, with no commit in the caller. The comment is the
+      # date of the pinned main commit, the transitional form until this repository tags its workflows
+      # (krateo-blueprints/charts#23). A change to chart-push reaches release-oci by moving this pin.
       - name: Chart push
         id: push
-        uses: krateo-platformops/.github/.github/actions/chart-push@main
+        uses: krateo-platformops/.github/.github/actions/chart-push@fb91b76eb585cdd2f148abfbfb6d14e05bcbacb4 # main 2026-11-18
 
       - name: Discover, version, package & push every first-class chart
         env:
