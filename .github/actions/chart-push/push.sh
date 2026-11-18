@@ -1,50 +1,105 @@
 #!/usr/bin/env bash
-# Pushes one packaged Helm chart with `helm push`, retrying ONLY ghcr.io's transient failure to tag
-# a manifest it has just accepted:
+# Push one packaged chart to an OCI registry, surviving GHCR's read-after-write race on the tag step and nothing else.
 #
-#   Error: failed to perform "Tag" on destination: sha256:<digest>: not found
+#   push.sh CHART.tgz oci://REGISTRY/PATH
 #
-# Why: the upload succeeds and the registry then cannot find the manifest it just stored when helm
-# tags it (read-after-write). On 2026-11-13 it failed dashboard-page in portal 1.8.115 and 1.8.116
-# (17 of 18 charts published), and earlier frontend 1.8.40 and portal 1.8.89, each fixed only by
-# re-running the job by hand. Pushing the same .tgz again is idempotent: the same bytes give the same
-# digest, so a retry tags exactly what the first attempt uploaded and never re-stamps a version.
+# Chart pushes go through this file (krateo-blueprints/charts PUBLISHING.md rule 14): release-oci.yaml runs it through
+# the chart-push action's `path` output, and a caller's own workflow through the action's push mode. It is krateo-blueprints/rabbitmq-operator-blueprint hack/push-chart.sh at commit
+# e22d03a02714e892791710dfad4beb3c9be6fc80 (sha256 102f721a363388d31412b0cc420ac45a5a32e88aa7e40e40453c0028c36fba2b),
+# adapted only where marked "ADAPTED" below. It replaces this action's earlier push.sh (1b398a48ff), which retried
+# the same error blind, three times with a growing backoff, and never checked which digest the tag landed on.
 #
-# Why only that error: a refused push (denied, a name the token cannot write, an invalid chart) is the
-# truth, and retrying would only delay the same failure, so anything else fails on the first attempt.
+# The race (on 2026-11-13 it failed dashboard-page in portal 1.8.115 and 1.8.116, and earlier frontend 1.8.40 and
+# portal 1.8.89; on 2026-11-18 the keycloak KOG 0.11.0 release and rabbitmq-operator-blueprint's first prerelease.yaml
+# run, 44279368853). `helm push` (oras-go ExtendedCopy) PUTs the manifest by digest, then tags it, and the tag
+# step first GETs that manifest by digest. GHCR answered that GET 404 about one second after accepting the PUT, so helm
+# exits with
+#     Error: failed to perform "Tag" on destination: sha256:<digest>: not found
+# and leaves an untagged manifest behind. Measured for run 44279368853: the GHCR versions API listed exactly one
+# version of charts/rabbitmq-cluster-operator, the untagged sha256:64960ed5..., created 09:48:36Z, the second helm
+# failed; a GET of that digest returned 200 a minute later.
 #
-# Usage: push.sh <chart.tgz> <oci://host/path>
-# Env:   CP_ATTEMPTS (total attempts, default 3), CP_BACKOFF (seconds, multiplied by the attempt
-#        number; default 10), CP_HELM (the helm command; default helm, replaced by a stub in the tests).
-set -uo pipefail
+# On that exact error only, this script polls until the registry serves the manifest at that digest (bounded:
+# PUSH_POLL_ATTEMPTS x PUSH_POLL_INTERVAL seconds, default 10 x 3), then pushes the SAME archive again. The second
+# push has the same manifest digest: helm builds the manifest from the archive bytes, Chart.yaml and the archive's
+# modification time (pkg/pusher/ocipusher.go PushOptCreationTime: ctime.Modified in v3.19.0, the version release-oci
+# sets up, and stat.ModTime in v4), none of which changed, so its PUT is idempotent and
+# its tag lands on the digest already there. The script checks that: a second push reporting another digest fails.
+# Any other push error fails at once, unretried; a digest still unfetchable after the bound fails, saying so.
+#
+# Reading the manifest uses the registry's own token challenge (WWW-Authenticate: Bearer realm=...), with
+# REGISTRY_USERNAME and REGISTRY_PASSWORD as credentials when set (anonymous otherwise), and checks the body hashes to
+# the digest. push_test.py, beside this file, drives this script with stand-in helm and curl.
+set -euo pipefail
 
-tgz="${1:?usage: push.sh <chart.tgz> <oci://host/path>}"
-repo="${2:?usage: push.sh <chart.tgz> <oci://host/path>}"
-attempts="${CP_ATTEMPTS:-3}"
-backoff="${CP_BACKOFF:-10}"
-helm="${CP_HELM:-helm}"
+die() { echo "::error::$*" >&2; exit 1; }
 
-# The one signature a retry can fix. Keep it exact: anything not matched fails immediately.
-transient='failed to perform "Tag" on destination: sha256:[0-9a-f]{64}: not found'
+tgz="${1:-}" repo="${2:-}"
+[ -f "$tgz" ] || die "usage: $0 CHART.tgz oci://REGISTRY/PATH (no archive at '${tgz}')"
+[[ "$repo" == oci://*/* ]] || die "usage: $0 CHART.tgz oci://REGISTRY/PATH (got '${repo}')"
+attempts="${PUSH_POLL_ATTEMPTS:-10}" interval="${PUSH_POLL_INTERVAL:-3}"
 
-log="$(mktemp)"
-trap 'rm -f "$log"' EXIT
+# ADAPTED: the source piped `tar -tzf` into `head -n1`. Under pipefail, tar killed by SIGPIPE once head exits makes the
+# assignment fail and set -e end the script with no message, on an archive whose listing outgrows one write. awk reads
+# the whole listing, so tar is never cut off; an archive tar cannot read fails saying so, not silently.
+name="$(tar -tzf "$tgz" | awk -F/ 'NR == 1 { print $1 }')" || die "${tgz} is not a readable chart archive"
+[ -n "$name" ] || die "${tgz} has no top-level chart directory"
+host="${repo#oci://}"; path="${host#*/}/${name}"; host="${host%%/*}"
 
-attempt=1
-while :; do
-  "$helm" push "$tgz" "$repo" 2>&1 | tee "$log"
-  rc=${PIPESTATUS[0]}
-  [ "$rc" -eq 0 ] && exit 0
-  if ! grep -Eq "$transient" "$log"; then
-    echo "::error::pushing $(basename "$tgz") failed (exit $rc) with an error that is not the registry's transient tag failure; not retrying." >&2
-    exit "$rc"
+work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
+
+RACE='failed to perform "Tag" on destination: sha256:[0-9a-f]{64}: not found'
+
+sha256_of() {
+  if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi
+}
+
+# 0 when the registry serves a manifest whose bytes hash to $1.
+fetchable() {
+  local digest="$1" url="https://${host}/v2/${path}/manifests/${1}" challenge realm service scope token auth=()
+  challenge="$(curl -sS -o /dev/null -D - "$url" | tr -d '\r' | grep -i '^www-authenticate: Bearer ' || true)"
+  if [ -n "$challenge" ]; then
+    realm="$(sed -n 's/.*realm="\([^"]*\)".*/\1/p' <<<"$challenge")"
+    service="$(sed -n 's/.*service="\([^"]*\)".*/\1/p' <<<"$challenge")"
+    scope="$(sed -n 's/.*scope="\([^"]*\)".*/\1/p' <<<"$challenge")"
+    [ -n "$realm" ] || return 1
+    local cred=()
+    # ADAPTED: this repository's credential names (release-oci.yaml and chart-version-guard set them), not the source's
+    # REGISTRY_USER and REGISTRY_TOKEN.
+    [ -n "${REGISTRY_PASSWORD:-}" ] && cred=(-u "${REGISTRY_USERNAME:-token}:${REGISTRY_PASSWORD}")
+    token="$(curl -fsS "${cred[@]+"${cred[@]}"}" -G "$realm" --data-urlencode "service=${service}" \
+      --data-urlencode "scope=${scope:-repository:${path}:pull}" | sed -n 's/.*"token" *: *"\([^"]*\)".*/\1/p')" || return 1
+    [ -n "$token" ] || return 1
+    auth=(-H "Authorization: Bearer ${token}")
   fi
-  if [ "$attempt" -ge "$attempts" ]; then
-    echo "::error::pushing $(basename "$tgz") still hit the registry's transient tag failure after $attempts attempts (exit $rc)." >&2
-    exit "$rc"
-  fi
-  wait=$((backoff * attempt))
-  echo "::warning::pushing $(basename "$tgz") hit the registry's transient tag failure (attempt $attempt of $attempts); retrying in ${wait}s." >&2
-  sleep "$wait"
-  attempt=$((attempt + 1))
+  curl -fsS "${auth[@]+"${auth[@]}"}" \
+    -H 'Accept: application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' \
+    -o "$work/manifest" "$url" 2>/dev/null || return 1
+  [ "sha256:$(sha256_of "$work/manifest")" = "$digest" ]
+}
+
+if helm push "$tgz" "$repo" >"$work/first" 2>&1; then
+  cat "$work/first"
+  exit 0
+fi
+cat "$work/first" >&2
+
+orphan="$(grep -oE "$RACE" "$work/first" | head -n1 | grep -oE 'sha256:[0-9a-f]{64}' || true)"
+[ -n "$orphan" ] || die "helm push ${tgz} failed, and not with GHCR's tag read-after-write race; not retrying"
+
+echo "::warning::helm push ${name}: the registry accepted manifest ${orphan} but 404'd reading it back to tag it (GHCR read-after-write race). Waiting for it to be served, then tagging that digest."
+served=""
+for i in $(seq 1 "$attempts"); do
+  if fetchable "$orphan"; then served=$i; break; fi
+  echo "poll ${i}/${attempts}: ${host}/${path}@${orphan} not served yet"
+  [ "$i" -lt "$attempts" ] && sleep "$interval"
 done
+[ -n "$served" ] \
+  || die "${host}/${path}@${orphan} was still not served after ${attempts} polls ${interval}s apart; it is untagged in the registry. Not tagging blind."
+echo "${host}/${path}@${orphan} served on poll ${served}; pushing the same archive again to tag that digest"
+
+helm push "$tgz" "$repo" >"$work/second" 2>&1 || { cat "$work/second" >&2; die "the second push of ${tgz} failed too"; }
+cat "$work/second"
+again="$(sed -n 's/^Digest: \(sha256:[0-9a-f]\{64\}\)$/\1/p' "$work/second" | head -n1)"
+[ "$again" = "$orphan" ] \
+  || die "the second push of ${tgz} reported digest '${again}', not ${orphan}: the archive changed between pushes, so the tag is not on the manifest first pushed"
