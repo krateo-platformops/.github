@@ -109,7 +109,7 @@ jobs:
       # failed this job in authn and installer until re-run by hand.
       - name: Download gitleaks
         id: gitleaks-dl
-        uses: krateo-platformops/.github/.github/actions/release-download@fb91b76eb585cdd2f148abfbfb6d14e05bcbacb4 # main 2026-11-18
+        uses: krateo-platformops/.github/.github/actions/release-download@5f126b7d93ec5302eb9cc57a3af157550175fbaf # main 2026-11-18
         with:
           repo: gitleaks/gitleaks
           tag: ${{ steps.gitleaks-ver.outputs.tag }}
@@ -314,11 +314,11 @@ jobs:
       # provider-runtime on 2026-10-28). A real install failure, like the x/vuln one above, still
       # fails on the first attempt, so the "never silence the install" rule holds.
       - name: Download modules
-        uses: krateo-platformops/.github/.github/actions/go-download@fb91b76eb585cdd2f148abfbfb6d14e05bcbacb4 # main 2026-11-18
+        uses: krateo-platformops/.github/.github/actions/go-download@5f126b7d93ec5302eb9cc57a3af157550175fbaf # main 2026-11-18
         with:
           working-directory: ${{ matrix.mod }}
       - name: Install govulncheck
-        uses: krateo-platformops/.github/.github/actions/go-download@fb91b76eb585cdd2f148abfbfb6d14e05bcbacb4 # main 2026-11-18
+        uses: krateo-platformops/.github/.github/actions/go-download@5f126b7d93ec5302eb9cc57a3af157550175fbaf # main 2026-11-18
         with:
           working-directory: ${{ matrix.mod }}
           run: GOTOOLCHAIN=auto go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
@@ -388,7 +388,7 @@ jobs:
       # errors only, and checked against the release's sha256 file.
       - name: Download syft
         id: syft
-        uses: krateo-platformops/.github/.github/actions/release-download@fb91b76eb585cdd2f148abfbfb6d14e05bcbacb4 # main 2026-11-18
+        uses: krateo-platformops/.github/.github/actions/release-download@5f126b7d93ec5302eb9cc57a3af157550175fbaf # main 2026-11-18
         with:
           repo: anchore/syft
           tag: v1.42.3
