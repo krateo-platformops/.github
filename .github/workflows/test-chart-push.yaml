@@ -100,6 +100,9 @@ jobs:
           grep -q -- '--password-stdin' "$STUB/login.args" || { echo "::error::login did not read the token from stdin"; exit 1; }
           [ "$(cat "$STUB/curl.cred")" = "stand-in-user:stand-in-placeholder-not-a-secret" ] \
             || { echo "::error::the read-back did not use the action's credentials"; exit 1; }
+          if grep -qF -e stand-in-placeholder-not-a-secret -e issued-token "$STUB/curl.argv"; then
+            echo "::error::a credential or the issued token reached curl's command line"; exit 1
+          fi
           echo "digest ${DIGEST} after the race, 2 pushes, 1 login, read back with the action's credentials"
 
   through-uses-other:

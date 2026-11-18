@@ -29,7 +29,10 @@
 #
 # Reading the manifest uses the registry's own token challenge (WWW-Authenticate: Bearer realm=...), with
 # REGISTRY_USERNAME and REGISTRY_PASSWORD as credentials when set (anonymous otherwise), and checks the body hashes to
-# the digest. push_test.py, beside this file, drives this script with stand-in helm and curl.
+# the digest. The credentials and the token reach curl as a config on its stdin (`-K -`), never on its command line,
+# where every process in the job could read them (/proc/<pid>/cmdline, ps); they go only to a token service on the
+# registry's own host. guard.sh, beside chart-version-guard, follows the same two rules. push_test.py, beside this
+# file, drives this script with stand-in helm and curl.
 set -euo pipefail
 
 die() { echo "::error::$*" >&2; exit 1; }
@@ -38,6 +41,10 @@ tgz="${1:-}" repo="${2:-}"
 [ -f "$tgz" ] || die "usage: $0 CHART.tgz oci://REGISTRY/PATH (no archive at '${tgz}')"
 [[ "$repo" == oci://*/* ]] || die "usage: $0 CHART.tgz oci://REGISTRY/PATH (got '${repo}')"
 attempts="${PUSH_POLL_ATTEMPTS:-10}" interval="${PUSH_POLL_INTERVAL:-3}"
+# A line break in a credential would end its curl config line and start another option there.
+case "${REGISTRY_USERNAME:-}${REGISTRY_PASSWORD:-}" in
+  *$'\n'* | *$'\r'*) die "REGISTRY_USERNAME or REGISTRY_PASSWORD contains a line break; refusing it" ;;
+esac
 
 # ADAPTED: the source piped `tar -tzf` into `head -n1`. Under pipefail, tar killed by SIGPIPE once head exits makes the
 # assignment fail and set -e end the script with no message, on an archive whose listing outgrows one write. awk reads
@@ -54,25 +61,37 @@ sha256_of() {
   if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi
 }
 
+# One curl config line, KEY = "VALUE", with \ and " escaped (curl's -K syntax).
+cfg_line() { local s="${2//\\/\\\\}"; s="${s//\"/\\\"}"; printf '%s = "%s"\n' "$1" "$s"; }
+# The `user` line for user $1 and password $2; they are joined here, never on a command line.
+cfg_user() { cfg_line user "$1:$2"; }
+
 # 0 when the registry serves a manifest whose bytes hash to $1.
 fetchable() {
-  local digest="$1" url="https://${host}/v2/${path}/manifests/${1}" challenge realm service scope token auth=()
+  local digest="$1" url="https://${host}/v2/${path}/manifests/${1}" challenge realm rhost service scope token conf=""
   challenge="$(curl -sS -o /dev/null -D - "$url" | tr -d '\r' | grep -i '^www-authenticate: Bearer ' || true)"
   if [ -n "$challenge" ]; then
     realm="$(sed -n 's/.*realm="\([^"]*\)".*/\1/p' <<<"$challenge")"
     service="$(sed -n 's/.*service="\([^"]*\)".*/\1/p' <<<"$challenge")"
     scope="$(sed -n 's/.*scope="\([^"]*\)".*/\1/p' <<<"$challenge")"
     [ -n "$realm" ] || return 1
-    local cred=()
+    rhost="${realm#*://}"; rhost="${rhost%%/*}"
+    local cred="" send=1
     # ADAPTED: this repository's credential names (release-oci.yaml and chart-version-guard set them), not the source's
-    # REGISTRY_USER and REGISTRY_TOKEN.
-    [ -n "${REGISTRY_PASSWORD:-}" ] && cred=(-u "${REGISTRY_USERNAME:-token}:${REGISTRY_PASSWORD}")
-    token="$(curl -fsS "${cred[@]+"${cred[@]}"}" -G "$realm" --data-urlencode "service=${service}" \
+    # REGISTRY_USER and REGISTRY_TOKEN. The source put them on curl's command line (`-u user:password`); here they go
+    # on its stdin, and only to a realm on the registry's own host.
+    # BEGIN realm-host (push_test.py deletes this block to prove its cases see it)
+    [ "$rhost" = "$host" ] || send=0
+    # END realm-host
+    if [ "$send" = 1 ] && [ -n "${REGISTRY_PASSWORD:-}" ]; then
+      cred="$(cfg_user "${REGISTRY_USERNAME:-token}" "${REGISTRY_PASSWORD}")"
+    fi
+    token="$(printf '%s\n' "$cred" | curl -fsS -K - -G "$realm" --data-urlencode "service=${service}" \
       --data-urlencode "scope=${scope:-repository:${path}:pull}" | sed -n 's/.*"token" *: *"\([^"]*\)".*/\1/p')" || return 1
     [ -n "$token" ] || return 1
-    auth=(-H "Authorization: Bearer ${token}")
+    conf="$(cfg_line header "Authorization: Bearer ${token}")"
   fi
-  curl -fsS "${auth[@]+"${auth[@]}"}" \
+  printf '%s\n' "$conf" | curl -fsS -K - \
     -H 'Accept: application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' \
     -o "$work/manifest" "$url" 2>/dev/null || return 1
   [ "sha256:$(sha256_of "$work/manifest")" = "$digest" ]

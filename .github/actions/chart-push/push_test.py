@@ -22,8 +22,12 @@ Mutants of the script (retry keyed on any error, the ': not found' suffix droppe
 no digest comparison, no body hash): each must make at least one case fail.
 
 Then the cases for what push.sh changes from its source (marked "ADAPTED" there), each with a mutant where one applies:
-  creds  the race with REGISTRY_USERNAME/REGISTRY_PASSWORD set -> the token request carries them (mutant: the source's
-         REGISTRY_USER/REGISTRY_TOKEN names)
+  creds  the race with REGISTRY_USERNAME/REGISTRY_PASSWORD set -> the token request carries them, as a `-K -` config
+         on curl's stdin; neither the password nor the issued token appears in any curl argv (the stand-in records
+         argv). Mutants: the source's REGISTRY_USER/REGISTRY_TOKEN names; the password back on argv (`-u user:pass`);
+         the Bearer token on argv (`-H`); config values not escaped (a password with a quote, backslashes and a space
+         must arrive intact); credentials sent to a realm on another host (it must get none, as in guard.sh); no
+         refusal of a line break in a credential (it would start another config option)
   big    an archive with 20000 entries -> 0, its name read from the first entry (no mutant: whether `| head -n1` kills
          tar depends on timing, so test-chart-push.yaml reports that, it does not gate on it)
   notgz  a file that is not a gzip archive -> 1, "not a readable chart archive" (mutant: no message)
@@ -40,12 +44,18 @@ Digest lines output the first (mutant: the digest read restored to `sed ... | he
 deletes or replaces each marked block (mode-check, input-check, digest-check, login) and requires the cases that block
 exists for to fail.
 
+Part 3, no credential on a command line: every .sh and .y*ml under .github is scanned (comment lines skipped) for
+`-u` with a password variable, `--user`, `--password` (not `--password-stdin`) and `:${...PASSWORD}`, after a
+self-test that plants each spelling (a grep for `--password` alone missed `-u user:pass`) and accepts the stdin forms.
+
 The source validator's last check, that every workflow's `helm push` goes through the script, is krateo-blueprints/charts
 PUBLISHING.md rule 14's job: its pinned-uses.yaml refuses a bare `helm push` or `oras push` in a caller's workflows.
 
 Fails (exit 2) when bash, tar or a file it tests is missing: a check that could not run has checked nothing.
 """
+import glob
 import hashlib
+import re
 import io
 import os
 import shutil
@@ -54,6 +64,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import types
 
 ACTION_DIR = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(ACTION_DIR, "push.sh")
@@ -97,27 +108,52 @@ esac
 '''
 
 CURL = r'''#!/usr/bin/env bash
-# stand-in curl: a registry with a Bearer challenge; the manifest is served from poll $STUB/at on
-out="" headers=0 url="" auth=""
+# stand-in curl: a registry with a Bearer challenge; the manifest is served from poll $STUB/at on. It records its argv,
+# one line per call, in $STUB/curl.argv, and reads `-K -` config lines (KEY = "VALUE", backslash escapes; a value ends
+# at its first unescaped quote, as curl's parser does) from stdin: `user` is recorded, `header` can carry the Bearer.
+printf '%s\n' "$*" >> "$STUB/curl.argv"
+out="" headers=0 url="" auth="" conf=0
 while [ $# -gt 0 ]; do
   case "$1" in
     -o) out="$2"; shift ;;
     -D) headers=1; shift ;;
     -H) case "$2" in "Authorization: Bearer "*) auth="${2#Authorization: Bearer }" ;; esac; shift ;;
     -u) printf '%s\n' "$2" > "$STUB/curl.cred"; shift ;;
+    -K) [ "$2" = - ] && conf=1; shift ;;
     --data-urlencode) shift ;;
     -*) ;;
     *) url="$1" ;;
   esac
   shift
 done
+if [ "$conf" = 1 ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -n "$line" ] || continue
+    key="${line%% =*}"; rest="${line#*= }"
+    [ "${rest:0:1}" = '"' ] || { echo "stand-in curl: unquoted config value: $line" >&2; exit 98; }
+    v="" i=1 n=${#rest}
+    while [ "$i" -lt "$n" ]; do
+      c="${rest:$i:1}"
+      if [ "$c" = '\' ]; then i=$((i + 1)); v+="${rest:$i:1}"
+      elif [ "$c" = '"' ]; then break
+      else v+="$c"; fi
+      i=$((i + 1))
+    done
+    case "$key" in
+      user) printf '%s\n' "$v" > "$STUB/curl.cred" ;;
+      header) case "$v" in "Authorization: Bearer "*) auth="${v#Authorization: Bearer }" ;; esac ;;
+      *) echo "stand-in curl: unexpected config key $key" >&2; exit 98 ;;
+    esac
+  done
+fi
+realm="${STANDIN_REALM:-https://reg.stand.in/token}"
 case "$url" in
-  https://auth.stand.in/token*) echo '{"token":"issued-token"}'; exit 0 ;;
+  https://reg.stand.in/token*|https://auth.elsewhere/token*) echo '{"token":"issued-token"}'; exit 0 ;;
   https://reg.stand.in/v2/*/manifests/*) ;;
   *) echo "stand-in curl: unexpected url $url" >&2; exit 99 ;;
 esac
 if [ "$headers" = 1 ]; then
-  printf 'HTTP/2 401\r\nwww-authenticate: Bearer realm="https://auth.stand.in/token",service="reg.stand.in",scope="repository:org/charts/demo:pull"\r\n\r\n'
+  printf 'HTTP/2 401\r\nwww-authenticate: Bearer realm="%s",service="reg.stand.in",scope="repository:org/charts/demo:pull"\r\n\r\n' "$realm"
   exit 0
 fi
 [ "$auth" = issued-token ] || exit 22
@@ -201,8 +237,10 @@ def run_case(script, case, tmp, env_extra=None):
     env = stub_env(stub)
     env.update(env_extra or {})
     r = subprocess.run(["bash", script, tgz, REPO], env=env, capture_output=True, text=True)
-    cred = os.path.join(stub, "curl.cred")
-    sent = open(cred).read().strip() if os.path.exists(cred) else ""
+    def read(f):
+        q = os.path.join(stub, f)
+        return open(q).read() if os.path.exists(q) else ""
+    sent = types.SimpleNamespace(cred=read("curl.cred").rstrip("\n"), argv=read("curl.argv"))
     return r.returncode, count(stub, "helm.calls"), count(stub, "get.calls"), r.stdout + r.stderr, sent
 
 
@@ -236,21 +274,55 @@ SCRIPT_MUTANTS = [
 ]
 
 NAME_LINE = """name="$(tar -tzf "$tgz" | awk -F/ 'NR == 1 { print $1 }')\""""
-# (case, env, check(rc, pushes, gets, log, sent credential), mutant label, anchor, replacement); label None: no mutant.
+QUOTED_PW = 'p"a\\ss w\\"rd'  # a quote, backslashes and a space: what curl's config syntax must escape
+TOKEN_CALL = '''printf '%s\\n' "$cred" | curl -fsS -K - -G "$realm"'''
+MANIFEST_CALL = '''printf '%s\\n' "$conf" | curl -fsS -K - \\'''
+CRED_SET = '''if [ "$send" = 1 ] && [ -n "${REGISTRY_PASSWORD:-}" ]; then
+      cred="$(cfg_user "${REGISTRY_USERNAME:-token}" "${REGISTRY_PASSWORD}")"'''
+NEWLINE_GUARD = '''case "${REGISTRY_USERNAME:-}${REGISTRY_PASSWORD:-}" in
+  *$'\\n'* | *$'\\r'*) die "REGISTRY_USERNAME or REGISTRY_PASSWORD contains a line break; refusing it" ;;
+esac
+'''
+
+
+def off_argv(s):
+    """Neither the password nor the issued token appears in any curl argv."""
+    return TOKEN not in s.argv and QUOTED_PW not in s.argv and "issued-token" not in s.argv
+
+
+CREDS = {"REGISTRY_USERNAME": USER, "REGISTRY_PASSWORD": TOKEN}
+# (case, env, check(rc, pushes, gets, log, sent), mutant label, anchor, replacement); label None: no mutant.
+# sent.cred is the `user` curl received (config or -u); sent.argv every curl argv, one call per line.
 ADAPTED = [
-    ("creds", {"REGISTRY_USERNAME": USER, "REGISTRY_PASSWORD": TOKEN},
-     lambda rc, p, g, log, sent: rc == 0 and p == 2 and sent == "%s:%s" % (USER, TOKEN),
+    ("creds", CREDS, lambda rc, p, g, log, s: rc == 0 and p == 2 and s.cred == "%s:%s" % (USER, TOKEN) and off_argv(s),
      "reads the source's REGISTRY_USER/REGISTRY_TOKEN",
-     '[ -n "${REGISTRY_PASSWORD:-}" ] && cred=(-u "${REGISTRY_USERNAME:-token}:${REGISTRY_PASSWORD}")',
-     '[ -n "${REGISTRY_TOKEN:-}" ] && cred=(-u "${REGISTRY_USER:-token}:${REGISTRY_TOKEN}")'),
-    ("big", {}, lambda rc, p, g, log, sent: rc == 0 and p == 1 and ("Digest: " + DIGEST) in log, None, None, None),
-    ("notgz", {}, lambda rc, p, g, log, sent: rc == 1 and p == 0 and "not a readable chart archive" in log,
+     CRED_SET, CRED_SET.replace("REGISTRY_PASSWORD", "REGISTRY_TOKEN").replace("REGISTRY_USERNAME", "REGISTRY_USER")),
+    ("creds", CREDS, lambda rc, p, g, log, s: rc == 0 and p == 2 and s.cred == "%s:%s" % (USER, TOKEN) and off_argv(s),
+     "the password on curl's argv (-u user:password, the source's form)",
+     TOKEN_CALL, '''curl -fsS -u "${REGISTRY_USERNAME:-token}:${REGISTRY_PASSWORD}" -G "$realm"'''),
+    ("creds", CREDS, lambda rc, p, g, log, s: rc == 0 and p == 2 and s.cred == "%s:%s" % (USER, TOKEN) and off_argv(s),
+     "the Bearer token on curl's argv (-H)",
+     MANIFEST_CALL, '''curl -fsS -H "Authorization: Bearer ${token}" \\'''),
+    ("creds", {"REGISTRY_USERNAME": USER, "REGISTRY_PASSWORD": QUOTED_PW},
+     lambda rc, p, g, log, s: rc == 0 and p == 2 and s.cred == "%s:%s" % (USER, QUOTED_PW) and off_argv(s),
+     "config values not escaped",
+     '''cfg_line() { local s="${2//\\\\/\\\\\\\\}"; s="${s//\\"/\\\\\\"}"; printf '%s = "%s"\\n' "$1" "$s"; }''',
+     '''cfg_line() { printf '%s = "%s"\\n' "$1" "$2"; }'''),
+    # A realm on another host gets no credentials (guard.sh's rule); the read-back still works anonymously.
+    ("creds", dict(CREDS, STANDIN_REALM="https://auth.elsewhere/token"),
+     lambda rc, p, g, log, s: rc == 0 and p == 2 and s.cred == "" and off_argv(s),
+     "credentials sent to a realm on another host", "BLOCK:realm-host", None),
+    ("nodigest", dict(CREDS, REGISTRY_PASSWORD="tok\nen"),
+     lambda rc, p, g, log, s: rc == 1 and p == 0 and "contains a line break" in log,
+     "no refusal of a line break in a credential", NEWLINE_GUARD, ""),
+    ("big", {}, lambda rc, p, g, log, s: rc == 0 and p == 1 and ("Digest: " + DIGEST) in log, None, None, None),
+    ("notgz", {}, lambda rc, p, g, log, s: rc == 1 and p == 0 and "not a readable chart archive" in log,
      "no message for an unreadable archive",
      NAME_LINE + ' || die "${tgz} is not a readable chart archive"', NAME_LINE),
     # Capture, then match. The second push's Digest read restored to `sed ... | head -n1` must die on 20000 lines. The
     # orphan read has no mutant: under `|| true` the head form keeps head's line, so no case can tell the two apart; the
     # case still proves a long race log is retried.
-    ("longrace", {}, lambda rc, p, g, log, sent: rc == 0 and p == 2,
+    ("longrace", {}, lambda rc, p, g, log, s: rc == 0 and p == 2,
      "the second push's Digest read through | head -n1",
      '''digests="$(sed -n 's/^Digest: \\(sha256:[0-9a-f]\\{64\\}\\)$/\\1/p' "$work/second")"
 again="$(sed -n 1p <<<"$digests")"''',
@@ -291,12 +363,20 @@ def part1(tmp):
                             % (name, rc, pushes, " | ".join(log.strip().splitlines()[-3:])))
         if label is None:
             continue
-        if src.count(a) != 1:
+        if a.startswith("BLOCK:"):
+            mutated = edit_block(src, a[len("BLOCK:"):])
+            if mutated is None:
+                failures.append("cannot plant mutant '%s': block %s is not marked exactly once" % (label, a))
+                print("FAIL  adapted mutant %s: block not marked exactly once" % label)
+                continue
+        elif src.count(a) != 1:
             failures.append("cannot plant mutant '%s': its anchor occurs %d times" % (label, src.count(a)))
             print("FAIL  adapted mutant %s: anchor occurs %d times" % (label, src.count(a)))
             continue
+        else:
+            mutated = src.replace(a, b)
         p = os.path.join(tmp, "mutant.sh")
-        open(p, "w").write(src.replace(a, b))
+        open(p, "w").write(mutated)
         rc, pushes, gets, log, sent = run_case(p, name, tmp, env)
         caught = not check(rc, pushes, gets, log, sent)
         print("%s  adapted mutant %-46s %s" % ("ok  " if caught else "FAIL", label, "caught by " + name if caught else "NOT CAUGHT"))
@@ -466,6 +546,66 @@ digest="$(sed -n 1p <<<"$digests")"'''
     return failures
 
 
+# ---- part 3: no credential on a command line, anywhere in this repository's shell and workflow files ---------------
+
+# A password or token on a command line is readable by every process in the job (/proc/<pid>/cmdline, ps) and can reach
+# crash dumps. Both spellings: a grep for `--password` alone missed `-u user:password` (the nova-kog session, 2026-11-18).
+ARGV_CRED = [
+    ("-u with a password variable", re.compile(r"""(?:^|\s)-u\s+\S*\$\{?[A-Za-z_]*(?:PASSWORD|PASS|SECRET)\b""")),
+    ("--user", re.compile(r"""(?:^|\s)--user(?:\s|=|$)""")),
+    ("--password (not --password-stdin)", re.compile(r"""(?:^|\s)--password(?!-stdin)(?:\s|=|$)""")),
+    ("user:${...PASSWORD} joined", re.compile(r""":\$\{?[A-Za-z_]*(?:PASSWORD|PASS|SECRET)\b""")),
+]
+ARGV_PLANTED = [
+    'cred=(-u "${REGISTRY_USERNAME:-token}:${REGISTRY_PASSWORD}")',
+    'curl -fsS -u "$REGISTRY_USERNAME:$REGISTRY_PASSWORD" -G "$realm"',
+    'curl --user "x:${REGISTRY_PASSWORD}" https://example.invalid',
+    'curl --user=x https://example.invalid',
+    'helm registry login ghcr.io --username u --password "$REGISTRY_PASSWORD"',
+    'oras login --password="$REGISTRY_PASSWORD" ghcr.io',
+    'curl -u x:$GHCR_PASS https://example.invalid',
+]
+ARGV_ACCEPTED = [
+    'printf \'%s\' "$REGISTRY_PASSWORD" | helm registry login "$host" --username "$REGISTRY_USERNAME" --password-stdin',
+    'echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin',
+    'cred="$(cfg_user "${REGISTRY_USERNAME:-token}" "${REGISTRY_PASSWORD}")"',
+    "          REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}",
+    '# curl -u "$U:$REGISTRY_PASSWORD"  (a comment)',
+]
+
+
+def argv_cred_hits(text):
+    hits = []
+    for n, line in enumerate(text.split("\n"), 1):
+        if line.lstrip().startswith("#"):
+            continue
+        for label, rx in ARGV_CRED:
+            if rx.search(line):
+                hits.append((n, label, line.strip()))
+    return hits
+
+
+def part3():
+    failures = []
+    bad = [l for l in ARGV_PLANTED if not argv_cred_hits(l)] + [l for l in ARGV_ACCEPTED if argv_cred_hits(l)]
+    for b in bad:
+        failures.append("credential-on-argv self-test misjudged: %s" % b)
+        print("FAIL  argv-cred self-test misjudged: %s" % b)
+    root = os.path.abspath(os.path.join(ACTION_DIR, "..", ".."))
+    files = sorted(glob.glob(os.path.join(root, "**", "*.sh"), recursive=True)
+                   + glob.glob(os.path.join(root, "**", "*.y*ml"), recursive=True))
+    if not files:
+        failures.append("no shell or workflow file under %s, so the credential scan checked nothing" % root)
+    for f in files:
+        for n, label, line in argv_cred_hits(open(f, encoding="utf-8").read()):
+            failures.append("%s:%d: %s on a command line: %s" % (os.path.relpath(f, os.path.dirname(root)), n, label, line))
+            print("FAIL  %s:%d: %s" % (os.path.relpath(f, os.path.dirname(root)), n, label))
+    if not failures:
+        print("ok    argv-cred: self-test %d planted refused, %d accepted passed; %d file(s) under .github, none puts a "
+              "credential on a command line" % (len(ARGV_PLANTED), len(ARGV_ACCEPTED), len(files)))
+    return failures
+
+
 def main():
     if len(sys.argv) == 4 and sys.argv[1] == "--stage":
         stage(sys.argv[2], sys.argv[3])
@@ -481,6 +621,7 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         failures, killed = part1(tmp)
         failures += part2(tmp)
+        failures += part3()
     if failures:
         for f in failures:
             print("FAIL: " + f)
