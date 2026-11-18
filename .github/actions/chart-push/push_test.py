@@ -23,8 +23,9 @@ no digest comparison, no body hash): each must make at least one case fail.
 
 Then the cases for what push.sh changes from its source (marked "ADAPTED" there), each with a mutant where one applies:
   creds  the race with REGISTRY_USERNAME/REGISTRY_PASSWORD set -> the token request carries them, as a `-K -` config
-         on curl's stdin; neither the password nor the issued token appears in any curl argv (the stand-in records
-         argv). Mutants: the source's REGISTRY_USER/REGISTRY_TOKEN names; the password back on argv (`-u user:pass`);
+         on curl's stdin; neither the password nor the issued token appears in the argv any curl invocation RECEIVED
+         (the stand-in records "$@" on every call, after the caller's arrays are expanded), and both still reach curl:
+         the parsed config carries the expected `user`, and the manifest read the `Authorization: Bearer` header. Mutants: the source's REGISTRY_USER/REGISTRY_TOKEN names; the password back on argv (`-u user:pass`);
          the Bearer token on argv (`-H`); config values not escaped (a password with a quote, backslashes and a space
          must arrive intact); credentials sent to a realm on another host (it must get none, as in guard.sh); no
          refusal of a line break in a credential (it would start another config option)
@@ -45,8 +46,10 @@ deletes or replaces each marked block (mode-check, input-check, digest-check, lo
 exists for to fail.
 
 Part 3, no credential on a command line: every .sh and .y*ml under .github is scanned (comment lines skipped) for
-`-u` with a password variable, `--user`, `--password` (not `--password-stdin`) and `:${...PASSWORD}`, after a
-self-test that plants each spelling (a grep for `--password` alone missed `-u user:pass`) and accepts the stdin forms.
+`-u` with a password variable, `--user`, `--password` (not `--password-stdin`), `:${...PASSWORD}`, `-H`/`--header`
+carrying `Authorization:` with a variable, and `--oauth2-bearer`, after a self-test that plants each spelling (a grep
+for `--password` alone missed `-u user:pass`; the old push.sh had both a `-u` and an `-H "Authorization: Bearer ..."`
+line, and both are planted verbatim) and accepts the stdin forms.
 
 The source validator's last check, that every workflow's `helm push` goes through the script, is krateo-blueprints/charts
 PUBLISHING.md rule 14's job: its pinned-uses.yaml refuses a bare `helm push` or `oras push` in a caller's workflows.
@@ -109,7 +112,8 @@ esac
 
 CURL = r'''#!/usr/bin/env bash
 # stand-in curl: a registry with a Bearer challenge; the manifest is served from poll $STUB/at on. It records its argv,
-# one line per call, in $STUB/curl.argv, and reads `-K -` config lines (KEY = "VALUE", backslash escapes; a value ends
+# one line per call, in $STUB/curl.argv (the arguments it RECEIVED, after the caller's shell expanded every array), and
+# reads `-K -` config lines (KEY = "VALUE", backslash escapes; a value ends
 # at its first unescaped quote, as curl's parser does) from stdin: `user` is recorded, `header` can carry the Bearer.
 printf '%s\n' "$*" >> "$STUB/curl.argv"
 out="" headers=0 url="" auth="" conf=0
@@ -117,7 +121,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     -o) out="$2"; shift ;;
     -D) headers=1; shift ;;
-    -H) case "$2" in "Authorization: Bearer "*) auth="${2#Authorization: Bearer }" ;; esac; shift ;;
+    -H) case "$2" in "Authorization: Bearer "*) auth="${2#Authorization: Bearer }"; printf '%s\n' "$2" > "$STUB/curl.header" ;; esac; shift ;;
     -u) printf '%s\n' "$2" > "$STUB/curl.cred"; shift ;;
     -K) [ "$2" = - ] && conf=1; shift ;;
     --data-urlencode) shift ;;
@@ -141,7 +145,7 @@ if [ "$conf" = 1 ]; then
     done
     case "$key" in
       user) printf '%s\n' "$v" > "$STUB/curl.cred" ;;
-      header) case "$v" in "Authorization: Bearer "*) auth="${v#Authorization: Bearer }" ;; esac ;;
+      header) case "$v" in "Authorization: Bearer "*) auth="${v#Authorization: Bearer }"; printf '%s\n' "$v" > "$STUB/curl.header" ;; esac ;;
       *) echo "stand-in curl: unexpected config key $key" >&2; exit 98 ;;
     esac
   done
@@ -240,7 +244,8 @@ def run_case(script, case, tmp, env_extra=None):
     def read(f):
         q = os.path.join(stub, f)
         return open(q).read() if os.path.exists(q) else ""
-    sent = types.SimpleNamespace(cred=read("curl.cred").rstrip("\n"), argv=read("curl.argv"))
+    sent = types.SimpleNamespace(cred=read("curl.cred").rstrip("\n"), argv=read("curl.argv"),
+                                 header=read("curl.header").rstrip("\n"))
     return r.returncode, count(stub, "helm.calls"), count(stub, "get.calls"), r.stdout + r.stderr, sent
 
 
@@ -285,9 +290,13 @@ esac
 '''
 
 
+BEARER = "Authorization: Bearer issued-token"
+
+
 def off_argv(s):
-    """Neither the password nor the issued token appears in any curl argv."""
-    return TOKEN not in s.argv and QUOTED_PW not in s.argv and "issued-token" not in s.argv
+    """Neither the password nor the issued token appears in any curl argv, and the token still reached curl: the
+    manifest read carried the Bearer header (so a version that stopped authenticating cannot pass)."""
+    return TOKEN not in s.argv and QUOTED_PW not in s.argv and "issued-token" not in s.argv and s.header == BEARER
 
 
 CREDS = {"REGISTRY_USERNAME": USER, "REGISTRY_PASSWORD": TOKEN}
@@ -555,6 +564,9 @@ ARGV_CRED = [
     ("--user", re.compile(r"""(?:^|\s)--user(?:\s|=|$)""")),
     ("--password (not --password-stdin)", re.compile(r"""(?:^|\s)--password(?!-stdin)(?:\s|=|$)""")),
     ("user:${...PASSWORD} joined", re.compile(r""":\$\{?[A-Za-z_]*(?:PASSWORD|PASS|SECRET)\b""")),
+    # The second exposure (the github-provider-kog session): a token in an Authorization header on argv.
+    ("-H/--header Authorization with a variable", re.compile(r"""(?:^|[\s(])(?:-H|--header)(?:\s+|=)["']?[Aa]uthorization:.*\$""")),
+    ("--oauth2-bearer", re.compile(r"""(?:^|\s)--oauth2-bearer(?:\s|=|$)""")),
 ]
 ARGV_PLANTED = [
     'cred=(-u "${REGISTRY_USERNAME:-token}:${REGISTRY_PASSWORD}")',
@@ -564,6 +576,12 @@ ARGV_PLANTED = [
     'helm registry login ghcr.io --username u --password "$REGISTRY_PASSWORD"',
     'oras login --password="$REGISTRY_PASSWORD" ghcr.io',
     'curl -u x:$GHCR_PASS https://example.invalid',
+    'auth=(-H "Authorization: Bearer ${token}")',
+    'curl -fsS -H "Authorization: Bearer ${token}" \\',
+    'curl --header "Authorization: token $GH_TOKEN" https://api.github.com',
+    'curl --header="Authorization: Basic ${B64}" https://example.invalid',
+    "curl -H 'Authorization: Bearer '\"$T\" https://example.invalid",
+    'curl --oauth2-bearer "$TOKEN" https://example.invalid',
 ]
 ARGV_ACCEPTED = [
     'printf \'%s\' "$REGISTRY_PASSWORD" | helm registry login "$host" --username "$REGISTRY_USERNAME" --password-stdin',
@@ -571,6 +589,8 @@ ARGV_ACCEPTED = [
     'cred="$(cfg_user "${REGISTRY_USERNAME:-token}" "${REGISTRY_PASSWORD}")"',
     "          REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}",
     '# curl -u "$U:$REGISTRY_PASSWORD"  (a comment)',
+    "    -H 'Accept: application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' \\",
+    'conf="$(cfg_line header "Authorization: Bearer ${token}")"',
 ]
 
 
