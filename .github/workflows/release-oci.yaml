@@ -258,8 +258,10 @@ jobs:
       - name: Registry login
         run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
 
-      # `helm push` with a bounded retry of ghcr.io's transient "failed to perform Tag ... not found"
-      # after an accepted upload, and of nothing else (see .github/actions/chart-push/push.sh).
+      # `helm push`, retrying only ghcr.io's "failed to perform Tag ... not found" after an accepted
+      # upload: once the registry serves that digest, the same archive is pushed again and must land on
+      # the same digest (see .github/actions/chart-push/push.sh). Locate mode: no inputs, so the step
+      # below runs push.sh once per chart, with REGISTRY_USERNAME/REGISTRY_PASSWORD for its read-back.
       - name: Chart push
         id: push
         uses: krateo-platformops/.github/.github/actions/chart-push@main

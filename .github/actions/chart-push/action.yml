@@ -1,13 +1,58 @@
 name: chart-push
 description: >-
-  Makes the chart push (push.sh) available to a job and outputs its path. push.sh runs `helm push`
-  and retries only ghcr.io's transient "failed to perform Tag ... not found" after an accepted
-  upload; every other failure fails on the first attempt. release-oci.yaml pushes every chart
-  through it. See push.sh for the matched error and the incidents behind it.
+  Pushes a packaged Helm chart with push.sh, which retries only ghcr.io's "failed to perform Tag ... not found" after
+  an accepted upload, re-pushing the same archive once the registry serves that digest and failing if the tag would
+  land on another one. Every other failure fails on the first attempt. With no inputs it only outputs push.sh's path,
+  which is how release-oci.yaml pushes every chart. With `chart` set it pushes that archive itself and outputs the
+  digest, which is how a caller's own workflow pushes (krateo-blueprints/charts PUBLISHING.md rule 14).
+
+# Two modes, chosen by `chart`:
+#
+#   - locate (no inputs): outputs `path`; run it as  bash "$path" <chart.tgz> <oci://host/path>  with
+#     REGISTRY_USERNAME and REGISTRY_PASSWORD in the environment for the read-back, after `helm registry login`.
+#     release-oci.yaml does this, once per chart.
+#   - push (`chart`, `repository`, `registry-username`, `registry-password`): logs in with the token on stdin, pushes,
+#     and outputs `digest`. A caller pins it like a reusable workflow (charts PUBLISHING.md rules 9 and 14):
+#
+#       - name: Push the chart
+#         id: push
+#         uses: krateo-platformops/.github/.github/actions/chart-push@<40-hex sha> # main YYYY-MM-DD
+#         with:
+#           chart: dist/<name>-<version>.tgz
+#           repository: oci://ghcr.io/krateo-blueprints/charts
+#           registry-username: ${{ github.actor }}
+#           registry-password: ${{ secrets.GITHUB_TOKEN }}
+#
+# Either way the caller sets up helm first. Credentials are passed by name: `secrets: inherit` passes nothing across
+# organisations, and `required` is not enforced for an action's inputs, so the step checks them: an empty credential,
+# or credentials without a chart, fails before anything is sent.
+
+inputs:
+  chart:
+    description: "push mode: path to one packaged chart archive (.tgz). Empty: locate mode, only `path` is output."
+    required: false
+    default: ""
+  repository:
+    description: "push mode: OCI repository, oci://REGISTRY/PATH, for example oci://ghcr.io/krateo-blueprints/charts"
+    required: false
+    default: ""
+  registry-username:
+    description: "push mode: registry user (for ghcr.io, github.actor)"
+    required: false
+    default: ""
+  registry-password:
+    description: "push mode: registry token with package write access (for ghcr.io, secrets.GITHUB_TOKEN with packages: write)"
+    required: false
+    default: ""
+
 outputs:
   path:
     description: "Absolute path of push.sh. Run it as: bash \"$path\" <chart.tgz> <oci://host/path>"
     value: ${{ steps.locate.outputs.path }}
+  digest:
+    description: "push mode: the manifest digest the registry holds under the chart's tag (sha256:...); empty in locate mode"
+    value: ${{ steps.push.outputs.digest }}
+
 runs:
   using: composite
   steps:
@@ -17,3 +62,42 @@ runs:
         set -euo pipefail
         command -v helm >/dev/null 2>&1 || { echo "::error::chart-push needs helm on the runner (set it up before this step)"; exit 1; }
         echo "path=$(cd "${GITHUB_ACTION_PATH}" && pwd -P)/push.sh" >> "$GITHUB_OUTPUT"
+
+    # Inputs reach the shell through env, never interpolated into it.
+    - id: push
+      shell: bash
+      env:
+        CHART: ${{ inputs.chart }}
+        REPOSITORY: ${{ inputs.repository }}
+        REGISTRY_USERNAME: ${{ inputs.registry-username }}
+        REGISTRY_PASSWORD: ${{ inputs.registry-password }}
+      run: |
+        set -euo pipefail
+        if [ -z "$CHART" ]; then
+          # BEGIN mode-check (push_test.py deletes this block to prove its cases see it)
+          if [ -n "${REPOSITORY}${REGISTRY_USERNAME}${REGISTRY_PASSWORD}" ]; then
+            echo "::error::chart-push: repository or credentials were given without chart; set chart to push, or pass no inputs to only locate push.sh"
+            exit 1
+          fi
+          # END mode-check
+          exit 0
+        fi
+        # BEGIN input-check (push_test.py deletes this block to prove its cases see it)
+        for v in REPOSITORY REGISTRY_USERNAME REGISTRY_PASSWORD; do
+          [ -n "${!v}" ] || { echo "::error::chart-push: input for ${v} is empty; push mode needs chart, repository, registry-username and registry-password, passed by name"; exit 1; }
+        done
+        # END input-check
+        [[ "$REPOSITORY" == oci://*/* ]] || { echo "::error::chart-push: repository must be oci://REGISTRY/PATH, got '${REPOSITORY}'"; exit 1; }
+        host="${REPOSITORY#oci://}"; host="${host%%/*}"
+        # One identity for the push and for push.sh's read-back of the manifest. The token goes on stdin, never argv.
+        # BEGIN login
+        printf '%s' "$REGISTRY_PASSWORD" | helm registry login "$host" --username "$REGISTRY_USERNAME" --password-stdin
+        # END login
+        log="$(mktemp)"
+        bash "${GITHUB_ACTION_PATH}/push.sh" "$CHART" "$REPOSITORY" | tee "$log"
+        digest="$(sed -n 's/^Digest: \(sha256:[0-9a-f]\{64\}\)$/\1/p' "$log" | head -n1)"
+        # BEGIN digest-check
+        [ -n "$digest" ] || { echo "::error::chart-push: the push of ${CHART} succeeded but reported no 'Digest: sha256:...' line, so there is no digest to output"; exit 1; }
+        # END digest-check
+        echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+        echo "pushed ${CHART} to ${REPOSITORY} at ${digest}"

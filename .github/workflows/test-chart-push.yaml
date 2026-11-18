@@ -1,7 +1,24 @@
 # NOT reusable: this repo's own CI for the chart push (.github/actions/chart-push), which every
-# chart repo's release-oci pushes through. A change to what it retries would otherwise ship untested
-# to every chart repo. The release-oci step that calls it is exercised end to end, against a
-# registry:2, by test-chart-version-guard.yaml's workflows job.
+# chart repo's release-oci pushes through, and which a caller's own workflow pushes through in push
+# mode (krateo-blueprints/charts PUBLISHING.md rule 14). A change to what it retries would otherwise
+# ship untested to every chart repo. The release-oci step that calls it is exercised end to end,
+# against a registry:2, by test-chart-version-guard.yaml's workflows job.
+#
+#   - push-rules: push_test.py. push.sh against stand-in helm and curl, in the 7 cases and 6 mutants
+#     of the script it was copied from (krateo-blueprints/rabbitmq-operator-blueprint e22d03a
+#     hack/validate-push-chart.py), then a case and, where one applies, a mutant for each line push.sh
+#     adapts; then the action's push step read out of action.yml, with its block mutants. Then the
+#     action in locate mode, as release-oci.yaml calls it.
+#   - through-uses-race / through-uses-other: the action in push mode called through `uses:` on a
+#     runner, with the stand-ins first on PATH. That proves what the cases cannot see: inputs reaching
+#     the step, GITHUB_ACTION_PATH finding push.sh, the digest reaching steps.<id>.outputs. A refusal
+#     can't run as a failing job without turning this repository's CI red, so the other-error call
+#     runs with continue-on-error and its outcome is asserted.
+#   - head-pipeline: a report, not a gate. It counts how often the source's `tar -tzf | head -n1`
+#     name read dies under pipefail on this runner's GNU tar, the line push.sh adapts.
+#
+# No registry is contacted: the stand-ins answer for reg.stand.in, and the password is a fixed
+# placeholder, not a secret.
 name: test-chart-push
 
 on:
@@ -10,7 +27,8 @@ on:
       - ".github/actions/chart-push/**"
       - ".github/workflows/test-chart-push.yaml"
   push:
-    branches: [main]
+    branches:
+      - main
     paths:
       - ".github/actions/chart-push/**"
       - ".github/workflows/test-chart-push.yaml"
@@ -22,16 +40,116 @@ jobs:
   push-rules:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: azure/setup-helm@v5.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2 # v5.0.0
         with:
           version: v3.19.0
-      - name: push.sh retries only the transient tag failure, as documented
-        run: bash .github/actions/chart-push/push_test.sh
-      - name: The action reports a runnable push
+      - name: push.sh retries only the race, on the same digest; the push step outputs it; every mutant is caught
+        run: |
+          set -euo pipefail
+          python3 -m venv /tmp/venv
+          /tmp/venv/bin/pip install --quiet "pyyaml==6.0.2"
+          PYTHONDONTWRITEBYTECODE=1 /tmp/venv/bin/python .github/actions/chart-push/push_test.py
+      - name: The action reports a runnable push (locate mode, as release-oci.yaml calls it)
         id: push
         uses: ./.github/actions/chart-push
-      - name: Assert the reported path
+      - name: Assert the reported path, and no digest in locate mode
         env:
           PUSH: ${{ steps.push.outputs.path }}
-        run: test -f "$PUSH" && test "$PUSH" -ef "$GITHUB_WORKSPACE/.github/actions/chart-push/push.sh"
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          test -f "$PUSH" && test "$PUSH" -ef "$GITHUB_WORKSPACE/.github/actions/chart-push/push.sh"
+          test -z "$DIGEST"
+
+  through-uses-race:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Stage the stand-ins for the race (the digest served on the second poll)
+        run: |
+          set -euo pipefail
+          stub="${RUNNER_TEMP}/stub"
+          expected="$(PYTHONDONTWRITEBYTECODE=1 python3 .github/actions/chart-push/push_test.py --stage "$stub" race)"
+          [ -n "$expected" ] || { echo "::error::staging printed no expected digest"; exit 1; }
+          {
+            echo "STUB=${stub}"
+            echo "EXPECTED=${expected}"
+            echo "PUSH_POLL_INTERVAL=0"
+          } >> "$GITHUB_ENV"
+          echo "${stub}/bin" >> "$GITHUB_PATH"
+      - name: Push through the action
+        id: push
+        uses: ./.github/actions/chart-push
+        with:
+          chart: ${{ runner.temp }}/stub/demo-0.1.0.tgz
+          repository: oci://reg.stand.in/org/charts
+          registry-username: stand-in-user
+          registry-password: stand-in-placeholder-not-a-secret
+      - name: The digest output is the pushed digest, after exactly two pushes and one login
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [ "$DIGEST" = "$EXPECTED" ] || { echo "::error::digest output '${DIGEST}', expected ${EXPECTED}"; exit 1; }
+          [ "$(cat "$STUB/helm.calls")" = 2 ] || { echo "::error::$(cat "$STUB/helm.calls") pushes, expected 2"; exit 1; }
+          [ "$(cat "$STUB/login.calls")" = 1 ] || { echo "::error::$(cat "$STUB/login.calls") logins, expected 1"; exit 1; }
+          grep -q -- '--password-stdin' "$STUB/login.args" || { echo "::error::login did not read the token from stdin"; exit 1; }
+          [ "$(cat "$STUB/curl.cred")" = "stand-in-user:stand-in-placeholder-not-a-secret" ] \
+            || { echo "::error::the read-back did not use the action's credentials"; exit 1; }
+          echo "digest ${DIGEST} after the race, 2 pushes, 1 login, read back with the action's credentials"
+
+  through-uses-other:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Stage the stand-ins for another error (a near miss of the race string)
+        run: |
+          set -euo pipefail
+          stub="${RUNNER_TEMP}/stub"
+          PYTHONDONTWRITEBYTECODE=1 python3 .github/actions/chart-push/push_test.py --stage "$stub" other > /dev/null
+          echo "STUB=${stub}" >> "$GITHUB_ENV"
+          echo "${stub}/bin" >> "$GITHUB_PATH"
+      - name: Push through the action (must fail)
+        id: push
+        continue-on-error: true
+        uses: ./.github/actions/chart-push
+        with:
+          chart: ${{ runner.temp }}/stub/demo-0.1.0.tgz
+          repository: oci://reg.stand.in/org/charts
+          registry-username: stand-in-user
+          registry-password: stand-in-placeholder-not-a-secret
+      - name: The action failed after one push, unretried, with no digest output
+        env:
+          OUTCOME: ${{ steps.push.outcome }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [ "$OUTCOME" = failure ] || { echo "::error::outcome '${OUTCOME}', expected failure"; exit 1; }
+          [ -z "$DIGEST" ] || { echo "::error::a failed push output digest '${DIGEST}'"; exit 1; }
+          [ "$(cat "$STUB/helm.calls")" = 1 ] || { echo "::error::$(cat "$STUB/helm.calls") pushes, expected 1"; exit 1; }
+          echo "refused after 1 push, no digest output"
+
+  head-pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: How often the source's name read dies under pipefail on GNU tar (reported, not gated)
+        run: |
+          set -uo pipefail
+          stub="${RUNNER_TEMP}/big"
+          PYTHONDONTWRITEBYTECODE=1 python3 .github/actions/chart-push/push_test.py --stage "$stub" big > /dev/null
+          tgz="$stub/demo-0.1.0.tgz"
+          died=0
+          for _ in $(seq 1 20); do
+            bash -c 'set -euo pipefail; n="$(tar -tzf "$1" | head -n1 | cut -d/ -f1)"; [ "$n" = demo ]' _ "$tgz" || died=$((died + 1))
+          done
+          echo "$(tar --version | head -n1): the source's name read died ${died} of 20 times on a $(tar -tzf "$tgz" | wc -l)-entry archive"
+          echo "::notice title=head-pipeline::source name read died ${died}/20 on GNU tar; push.sh reads the whole listing instead"
