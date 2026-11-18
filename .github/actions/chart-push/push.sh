@@ -84,7 +84,10 @@ if helm push "$tgz" "$repo" >"$work/first" 2>&1; then
 fi
 cat "$work/first" >&2
 
-orphan="$(grep -oE "$RACE" "$work/first" | head -n1 | grep -oE 'sha256:[0-9a-f]{64}' || true)"
+# Capture, then match: no reader that stops early sits on a pipe (under pipefail its producer's SIGPIPE would be the
+# pipeline's status). Here `|| true` already kept head's line, so this is the form, not a behaviour change.
+races="$(grep -oE "$RACE" "$work/first" || true)"
+orphan="$(grep -m1 -oE 'sha256:[0-9a-f]{64}' <<<"$races" || true)"
 [ -n "$orphan" ] || die "helm push ${tgz} failed, and not with GHCR's tag read-after-write race; not retrying"
 
 echo "::warning::helm push ${name}: the registry accepted manifest ${orphan} but 404'd reading it back to tag it (GHCR read-after-write race). Waiting for it to be served, then tagging that digest."
@@ -100,6 +103,9 @@ echo "${host}/${path}@${orphan} served on poll ${served}; pushing the same archi
 
 helm push "$tgz" "$repo" >"$work/second" 2>&1 || { cat "$work/second" >&2; die "the second push of ${tgz} failed too"; }
 cat "$work/second"
-again="$(sed -n 's/^Digest: \(sha256:[0-9a-f]\{64\}\)$/\1/p' "$work/second" | head -n1)"
+# Capture, then take the first: `sed ... | head -n1` fails the assignment, and set -e ends the script with no message,
+# when head exits before sed has written everything (push_test.py case "longrace").
+digests="$(sed -n 's/^Digest: \(sha256:[0-9a-f]\{64\}\)$/\1/p' "$work/second")"
+again="$(sed -n 1p <<<"$digests")"
 [ "$again" = "$orphan" ] \
   || die "the second push of ${tgz} reported digest '${again}', not ${orphan}: the archive changed between pushes, so the tag is not on the manifest first pushed"

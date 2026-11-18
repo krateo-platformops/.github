@@ -95,7 +95,9 @@ runs:
         # END login
         log="$(mktemp)"
         bash "${GITHUB_ACTION_PATH}/push.sh" "$CHART" "$REPOSITORY" | tee "$log"
-        digest="$(sed -n 's/^Digest: \(sha256:[0-9a-f]\{64\}\)$/\1/p' "$log" | head -n1)"
+        # Capture, then take the first (no reader that stops early on a pipe; push_test.py case "many Digest lines").
+        digests="$(sed -n 's/^Digest: \(sha256:[0-9a-f]\{64\}\)$/\1/p' "$log")"
+        digest="$(sed -n 1p <<<"$digests")"
         # BEGIN digest-check
         [ -n "$digest" ] || { echo "::error::chart-push: the push of ${CHART} succeeded but reported no 'Digest: sha256:...' line, so there is no digest to output"; exit 1; }
         # END digest-check
