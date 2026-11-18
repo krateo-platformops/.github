@@ -66,7 +66,7 @@ jobs:
       # keeps a dropped proxy.golang.org stream from red-ticking the job (see go-download/retry.sh).
       - name: Download modules
         if: ${{ inputs.vet || inputs.tidy_check }}
-        uses: krateo-platformops/.github/.github/actions/go-download@653ac1e67d761584993a774c76963514968b3650 # main 2026-11-18
+        uses: krateo-platformops/.github/.github/actions/go-download@88eaff13555233606da5ff3ff3bfed8f534436ce # main 2026-11-18
         with:
           working-directory: ${{ inputs.module }}
 
@@ -173,7 +173,7 @@ jobs:
       # "stream error: stream ID 489; INTERNAL_ERROR" from proxy.golang.org and blocked its pin
       # until re-run by hand. Any other download failure still fails on the first attempt.
       - name: Gather dependencies
-        uses: krateo-platformops/.github/.github/actions/go-download@653ac1e67d761584993a774c76963514968b3650 # main 2026-11-18
+        uses: krateo-platformops/.github/.github/actions/go-download@88eaff13555233606da5ff3ff3bfed8f534436ce # main 2026-11-18
         with:
           working-directory: ${{ inputs.module }}
       - name: Run coverage
@@ -196,7 +196,7 @@ jobs:
         with:
           go-version-file: ${{ inputs.module }}/go.mod
       - name: Download modules
-        uses: krateo-platformops/.github/.github/actions/go-download@653ac1e67d761584993a774c76963514968b3650 # main 2026-11-18
+        uses: krateo-platformops/.github/.github/actions/go-download@88eaff13555233606da5ff3ff3bfed8f534436ce # main 2026-11-18
         with:
           working-directory: ${{ inputs.module }}
       - name: Regenerate CRDs
