@@ -1,0 +1,35 @@
+# NOT reusable: this repo's own check that release-oci.yaml refuses a chart version before anything is pushed, with
+# krateo-blueprints/charts rule 13's core (.github/scripts/release_version_test.py: cases, two mutants, and the core
+# compared byte for byte with charts' PLAIN_VERSION).
+name: test-release-version
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/release-oci.yaml"
+      - ".github/workflows/test-release-version.yaml"
+      - ".github/scripts/release_version_test.py"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/release-oci.yaml"
+      - ".github/workflows/test-release-version.yaml"
+      - ".github/scripts/release_version_test.py"
+
+permissions:
+  contents: read
+
+jobs:
+  release-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: release-oci refuses a non-X.Y.Z(-pre) chart version, and its core is charts' rule 13
+        run: |
+          set -euo pipefail
+          python3 -m venv /tmp/venv
+          /tmp/venv/bin/pip install --quiet "pyyaml==6.0.2"
+          PYTHONDONTWRITEBYTECODE=1 /tmp/venv/bin/python -I .github/scripts/release_version_test.py .
