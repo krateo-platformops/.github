@@ -60,7 +60,7 @@ jobs:
 
       - name: Chart version guard
         id: guard
-        uses: krateo-platformops/.github/.github/actions/chart-version-guard@main
+        uses: krateo-platformops/.github/.github/actions/chart-version-guard@fb91b76eb585cdd2f148abfbfb6d14e05bcbacb4 # main 2026-11-18
 
       - name: Check every chart version against the registry
         env:

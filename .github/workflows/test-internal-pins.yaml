@@ -1,0 +1,30 @@
+# NOT reusable: this repo's own check that every call it makes into itself is pinned by commit
+# (.github/scripts/internal_pins.py). A caller that pins one of these reusables by SHA freezes only
+# that file's text; an internal `@main` inside it still moves under the caller. The script's header
+# says what it accepts; its self-test plants unpinned forms and must refuse each.
+name: test-internal-pins
+
+on:
+  pull_request:
+    paths:
+      - ".github/**"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/**"
+
+permissions:
+  contents: read
+
+jobs:
+  internal-pins:
+    runs-on: ubuntu-latest
+    steps:
+      # Full history: a pin must name a commit on this checkout's history.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Every internal uses is a commit on this history, with its date or version
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -I .github/scripts/internal_pins.py .
