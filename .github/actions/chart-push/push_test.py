@@ -27,12 +27,16 @@ Then the cases for what push.sh changes from its source (marked "ADAPTED" there)
   big    an archive with 20000 entries -> 0, its name read from the first entry (no mutant: whether `| head -n1` kills
          tar depends on timing, so test-chart-push.yaml reports that, it does not gate on it)
   notgz  a file that is not a gzip archive -> 1, "not a readable chart archive" (mutant: no message)
+  longrace  20000 race lines from the first push, 20000 Digest lines from the second -> 0, two pushes (mutant: the
+         second push's Digest read restored to `sed ... | head -n1`, which dies under pipefail; the orphan read has no
+         mutant, because under `|| true` its head form keeps head's line and behaves the same)
 
 Part 2, the action. The push step's shell is read out of action.yml, so this tests the bytes callers run, with the env
 the step maps from its inputs (checked against action.yml first). Cases: locate mode (no inputs) does nothing and
 passes; credentials without a chart fail; a push outputs the digest, and logs in once with the token on stdin, never in
 argv or the log; the race outputs the same digest; another error outputs nothing; a push that reports no digest fails;
-an empty password or user fails before helm runs; a repository that is not oci://... fails before helm runs. Then it
+an empty password or user fails before helm runs; a repository that is not oci://... fails before helm runs; 20000
+Digest lines output the first (mutant: the digest read restored to `sed ... | head -n1`). Then it
 deletes or replaces each marked block (mode-check, input-check, digest-check, login) and requires the cases that block
 exists for to fail.
 
@@ -84,6 +88,8 @@ line="$(sed -n "${n}p" "$STUB/plan")"
 case "$line" in
   ok\ *) echo "Pushed: x"; echo "Digest: ${line#ok }" ;;
   nodigest) echo "Pushed: x" ;;
+  okmany\ *) echo "Pushed: x"; for _ in $(seq 1 20000); do echo "Digest: ${line#okmany }"; done ;;
+  racemany\ *) for _ in $(seq 1 20000); do echo "Error: failed to perform \"Tag\" on destination: ${line#racemany }: not found"; done >&2; exit 1 ;;
   race\ *) echo "Error: failed to perform \"Tag\" on destination: ${line#race }: not found" >&2; exit 1 ;;
   err\ *) echo "Error: ${line#err }" >&2; exit 1 ;;
   *) echo "stand-in helm: no plan for call $n" >&2; exit 98 ;;
@@ -137,6 +143,9 @@ STAGE_ONLY = {
     "creds": (["race " + DIGEST, "ok " + DIGEST], 2, BODY),
     "big": (["ok " + DIGEST], 1, BODY),
     "notgz": (["ok " + DIGEST], 1, BODY),
+    # Far more output than one pipe write: 20000 race lines from the first push, 20000 Digest lines from the second.
+    "longrace": (["racemany " + DIGEST, "okmany " + DIGEST], 1, BODY),
+    "manydigest": (["okmany " + DIGEST], 1, BODY),
 }
 BIG_ENTRIES = 20000
 
@@ -238,6 +247,14 @@ ADAPTED = [
     ("notgz", {}, lambda rc, p, g, log, sent: rc == 1 and p == 0 and "not a readable chart archive" in log,
      "no message for an unreadable archive",
      NAME_LINE + ' || die "${tgz} is not a readable chart archive"', NAME_LINE),
+    # Capture, then match. The second push's Digest read restored to `sed ... | head -n1` must die on 20000 lines. The
+    # orphan read has no mutant: under `|| true` the head form keeps head's line, so no case can tell the two apart; the
+    # case still proves a long race log is retried.
+    ("longrace", {}, lambda rc, p, g, log, sent: rc == 0 and p == 2,
+     "the second push's Digest read through | head -n1",
+     '''digests="$(sed -n 's/^Digest: \\(sha256:[0-9a-f]\\{64\\}\\)$/\\1/p' "$work/second")"
+again="$(sed -n 1p <<<"$digests")"''',
+     '''again="$(sed -n 's/^Digest: \\(sha256:[0-9a-f]\\{64\\}\\)$/\\1/p' "$work/second" | head -n1)"'''),
 ]
 
 
@@ -338,6 +355,8 @@ def login_clean(stub, log):
 
 
 STEP_CASES = [
+    ("many Digest lines: outputs the first", "manydigest", {},
+     lambda rc, p, l, o, log, stub: rc == 0 and p == 1 and o == "digest=%s\n" % DIGEST, None),
     ("locate mode: no inputs, nothing pushed", "ok", {"CHART": "", "REPOSITORY": "", "REGISTRY_USERNAME": "", "REGISTRY_PASSWORD": ""},
      lambda rc, p, l, o, log, stub: rc == 0 and p == 0 and l == 0 and o == "", None),
     ("credentials without a chart: fails", "ok", {"CHART": ""},
@@ -429,6 +448,21 @@ def part2(tmp):
                                                      "caught" if caught else "NOT CAUGHT: the case does not test this block"))
             if not caught:
                 failures.append("step mutant %s not caught by %s" % (label, name))
+    # Capture, then match, in the step: the digest read restored to `sed ... | head -n1` must die on 20000 Digest lines.
+    anchor = '''digests="$(sed -n 's/^Digest: \\(sha256:[0-9a-f]\\{64\\}\\)$/\\1/p' "$log")"
+digest="$(sed -n 1p <<<"$digests")"'''
+    head_form = '''digest="$(sed -n 's/^Digest: \\(sha256:[0-9a-f]\\{64\\}\\)$/\\1/p' "$log" | head -n1)"'''
+    if script.count(anchor) != 1:
+        failures.append("cannot plant the step's head-form mutant: its anchor occurs %d times" % script.count(anchor))
+        print("FAIL  step head-form mutant: anchor occurs %d times" % script.count(anchor))
+    else:
+        case = [c for c in STEP_CASES if c[0] == "many Digest lines: outputs the first"][0]
+        rc, p, l, o, log, stub = run_step(script.replace(anchor, head_form), case[1], case[2], tmp)
+        caught = not case[3](rc, p, l, o, log, stub)
+        print("%s  step mutant %-22s %-42s %s" % ("ok  " if caught else "FAIL", "digest read | head -n1", case[0],
+                                                 "caught" if caught else "NOT CAUGHT"))
+        if not caught:
+            failures.append("step mutant digest read | head -n1 not caught by %s" % case[0])
     return failures
 
 
