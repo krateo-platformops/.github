@@ -108,7 +108,7 @@ jobs:
   # ImagePullBackOffs on every install, several layers from the cause (oasgen-provider#62).
   # Nested rather than inlined so the check has ONE definition shared with the PR-time caller.
   verify-images:
-    uses: krateo-platformops/.github/.github/workflows/chart-images.yaml@5f126b7d93ec5302eb9cc57a3af157550175fbaf # main 2026-11-18
+    uses: krateo-platformops/.github/.github/workflows/chart-images.yaml@653ac1e67d761584993a774c76963514968b3650 # main 2026-11-18
     permissions:
       contents: read
       packages: read
@@ -209,7 +209,7 @@ jobs:
       # same code.
       - name: Chart version guard
         id: guard
-        uses: krateo-platformops/.github/.github/actions/chart-version-guard@5f126b7d93ec5302eb9cc57a3af157550175fbaf # main 2026-11-18
+        uses: krateo-platformops/.github/.github/actions/chart-version-guard@653ac1e67d761584993a774c76963514968b3650 # main 2026-11-18
 
       - name: Helm setup
         uses: azure/setup-helm@v5.0.0
@@ -268,7 +268,7 @@ jobs:
       # (krateo-blueprints/charts#23). A change to chart-push reaches release-oci by moving this pin.
       - name: Chart push
         id: push
-        uses: krateo-platformops/.github/.github/actions/chart-push@5f126b7d93ec5302eb9cc57a3af157550175fbaf # main 2026-11-18
+        uses: krateo-platformops/.github/.github/actions/chart-push@653ac1e67d761584993a774c76963514968b3650 # main 2026-11-18
 
       - name: Discover, version, package & push every first-class chart
         env:
