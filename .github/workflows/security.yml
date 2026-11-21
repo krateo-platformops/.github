@@ -337,8 +337,21 @@ jobs:
         with:
           working-directory: ${{ matrix.mod }}
           run: GOTOOLCHAIN=auto go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+      # BOUNDED, because on a large module the scan can starve the runner itself: on
+      # krateo-agentiko/kagent-adk (upstream kagent's whole module: controller, CLI, agent runtime,
+      # Kubernetes deps) 2 of 3 runs ended after 46 min with "The hosted runner lost communication
+      # with the server" inside this step, and no result. GOMEMLIMIT is a soft limit for the Go GC,
+      # derived from THIS runner's memory (public and private repos get different runner sizes), so
+      # the scan collects harder instead of exhausting the host; it changes nothing about what is
+      # scanned or reported. timeout-minutes turns a scan that still cannot finish into a clear
+      # step failure instead of a lost runner.
       - name: govulncheck
-        run: govulncheck ./... || true   # report first; drop `|| true` to gate
+        timeout-minutes: 40
+        run: |
+          mem_kib=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
+          export GOMEMLIMIT="$(( mem_kib * 7 / 10 ))KiB"
+          echo "runner MemTotal ${mem_kib} KiB, nproc $(nproc); GOMEMLIMIT=${GOMEMLIMIT}"
+          govulncheck ./... || true   # report first; drop `|| true` to gate
       - name: gosec (SARIF)
         uses: securego/gosec@master
         with: { args: "-no-fail -fmt sarif -out gosec.sarif ${{ matrix.mod }}/..." }
