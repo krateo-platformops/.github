@@ -47,6 +47,29 @@ not have merged, and tagging what you assume is `main` produces a version that i
 its predecessor and silently missing the change. Verify with `git rev-list -n1 <tag>` or by grepping
 the tag's tree, and check the tag on the **remote** — a stale local tag will lie to `git log`.
 
+## Changing a shared workflow
+
+This repository's reusable workflows are called by every repository in the organisation, and two
+things about that are invisible from here:
+
+- **A caller on a branch ref (`@main`) receives every merge to `main` immediately.** A major version
+  protects only callers pinned by commit SHA. Before merging a breaking change (a new required input, a
+  removed one), search every organisation for callers of the workflow by branch ref, with a control
+  that the search reads real files, and get them pinned to the current release first. On 2026-11-22
+  release-oci 2.0.0 reached main with a required input and broke the release of every `@main` caller
+  at startup (9 repositories; two releases published nothing).
+- **This repository's CI never runs a workflow the way a caller does.** A step action from another
+  repository is staged in the CALLER's job: the runner downloads and unpacks that repository's whole
+  archive before any step runs. A change that adds or moves an action, or the repository an action
+  comes from, can be green here and fail every caller at "Prepare all required actions"; the same
+  release-oci 2.0.0 did, on a dangling symlink in krateo-blueprints/charts. **Before announcing such a
+  change as safe to pin, prove it with a caller run**: a `dry_run` dispatch from a branch of a real
+  caller pinned to the candidate commit (alert-provider run 45083740900 is the template).
+
+A caller pins `@<commit> # X.Y.Z`, or `@<commit> # main YYYY-MM-DD` with **the commit's own date** before
+the tag exists (krateo-blueprints/charts pinned-uses accepts only those two forms); the tag then goes on
+that same commit, so what callers tested is what is released.
+
 ## Documentation
 
 `krateo-platformops` and `krateo-agentiko` repositories follow the **Krateo Documentation
