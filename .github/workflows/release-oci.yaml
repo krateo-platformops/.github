@@ -121,6 +121,11 @@
 #   • every package passes the index's own content gate (krateo-blueprints/charts index-gate, the definition
 #     publish-chart runs: right channel, complete archive, sources, plain version), so a chart the index
 #     would refuse never reaches the registry.
+# And after the push (not in a dry run), the charts this run PUSHED are indexed here, so one call both
+# pushes and indexes: the collect job pulls each back from GHCR at its version, so the index stores the
+# registry's exact bytes (PUBLISHING.md rule 1; a repackage has fresh mtimes), and publish-index calls
+# krateo-blueprints/charts publish-chart with them. A chart skipped as already published with identical
+# contents is not sent: its first release indexed it, and the publisher refuses an already-stored version.
 #
 # Migrating to 2.0.0 from a repository's own release (repository standard R5):
 #   1. grep the repository for the old workflow's FILENAME first (e.g. release-tag.yaml): a script or a check
@@ -240,6 +245,9 @@ jobs:
 
   package-and-push:
     needs: [verify-images, release-preflight, index-preflight]
+    outputs:
+      # The charts this run pushed, as a JSON array of {name, version}; skipped (already published) excluded.
+      pushed: ${{ steps.release.outputs.pushed }}
     runs-on: ubuntu-latest
     # One check-and-push at a time per repository. Without it, two releases of one repo that overlap,
     # e.g. two tags pushed close together, or a tag and a workflow_dispatch, could both find a
@@ -415,6 +423,7 @@ jobs:
         uses: krateo-blueprints/charts/.github/actions/index-gate@b1326a80e621974dc47632c2519941b30e714af5 # 1.9.1
 
       - name: Discover, version, package & push every first-class chart
+        id: release
         env:
           CHART_VERSION_GUARD: ${{ steps.guard.outputs.path }}
           SHIP_CD: ${{ steps.guard.outputs.ship_cd }}
@@ -712,6 +721,20 @@ jobs:
           fi
           echo "done: pushed $(( ${#ok_of[@]} - ${#skip_of[@]} )), skipped ${#skip_of[@]} already published with identical contents, of ${#charts[@]} chart(s)"
 
+          # BEGIN pushed output (.github/scripts/release_oci_index_test.py runs it)
+          # What publish-index indexes: the charts pushed by THIS run, each with the name and version its package
+          # carries. A skipped chart is excluded (see the header).
+          pushed='[]'
+          for d in "${charts[@]}"; do
+            if [ -n "${ok_of[${d}]:-}" ] && [ -z "${skip_of[${d}]:-}" ]; then
+              meta="$(tar -xzOf "${tgz_of[${d}]}" "$(yq -r '.name' "${d}/Chart.yaml")/Chart.yaml")"
+              pushed="$(jq -c --arg n "$(yq -r '.name' <<< "${meta}")" --arg v "$(yq -r '.version' <<< "${meta}")" '. + [{name: $n, version: $v}]' <<< "${pushed}")"
+            fi
+          done
+          echo "pushed=${pushed}" >> "${GITHUB_OUTPUT:-/dev/null}"
+          echo "to index: ${pushed}"
+          # END pushed output
+
       # The packages this run built, in both modes: a rehearsal's proof of what it would have pushed,
       # and a release's record of what it did (see the header).
       - name: Upload the packages
@@ -721,3 +744,54 @@ jobs:
           name: release-oci-charts
           path: dist/*.tgz
           if-no-files-found: error
+
+  # Pull back from GHCR exactly the charts this run pushed, so the index stores the registry's bytes (see the header).
+  collect:
+    needs: [package-and-push]
+    if: ${{ inputs.index_channel != 'none' && !inputs.dry_run && needs.package-and-push.outputs.pushed != '[]' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    env:
+      OCI_REPO: ${{ inputs.oci_repo }}
+      PUSHED: ${{ needs.package-and-push.outputs.pushed }}
+    steps:
+      - name: Helm setup
+        uses: azure/setup-helm@v5.0.0
+        with:
+          version: v3.19.0
+      - name: Registry login
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: Pull every pushed chart back, and assert the set
+        run: |
+          set -euo pipefail
+          mkdir -p index-dist
+          want=()
+          while IFS=$'\t' read -r name version; do
+            helm pull "${OCI_REPO}/${name}" --version "${version}" -d index-dist
+            want+=("${name}-${version}.tgz")
+          done < <(jq -r '.[] | [.name, .version] | @tsv' <<< "${PUSHED}")
+          got="$(find index-dist -maxdepth 1 -type f -name '*.tgz' -exec basename {} \; | sort | tr '\n' ' ')"
+          exp="$(printf '%s\n' "${want[@]}" | sort | tr '\n' ' ')"
+          if [ "${got}" != "${exp}" ]; then
+            echo "::error::pulled back '${got}', expected exactly '${exp}'"; exit 1
+          fi
+          echo "to index: ${got}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-oci-index
+          path: index-dist/*.tgz
+          if-no-files-found: error
+
+  # The org's one index publisher, pinned by commit (PUBLISHING.md rule 9): it receives the publish token.
+  publish-index:
+    needs: [collect]
+    uses: krateo-blueprints/charts/.github/workflows/publish-chart.yaml@b1326a80e621974dc47632c2519941b30e714af5 # 1.9.1
+    with:
+      source_repo: ${{ github.repository }}
+      git_tag: ${{ inputs.chart_version || github.ref_name }}
+      channel: ${{ inputs.index_channel }}
+      artifact: release-oci-index
+    secrets:
+      PUBLISH_TOKEN: ${{ secrets.charts_publish_token }}
