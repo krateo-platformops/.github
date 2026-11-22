@@ -3,8 +3,9 @@
 
 1. The index preflight (the `# BEGIN index preflight` ... `# END index preflight` block, run as written):
      refused  an unknown channel; a channel but none with no token; a token with a trailing newline, a space
-              inside it, or a tab
-     accepted none with no token; a channel with a clean token
+              inside it, or a tab; blueprints or pages with oci_repo outside oci://ghcr.io/krateo-blueprints/charts
+              (its krateo-platformops default, an old org name)
+     accepted none with no token; a channel with a clean token; operators with another registry
    and the token is never printed. Then the block is deleted and every refused case must be accepted.
 2. Structure, read from the file:
      - index_channel is a required input; charts_publish_token is an optional secret;
@@ -33,35 +34,40 @@ def block():
 
 
 TOKEN = "ghp_" + "A1b2C3d4" * 4  # a token-shaped test value built at run time; not a credential
+BP = "oci://ghcr.io/krateo-blueprints/charts"
+PO = "oci://ghcr.io/krateo-platformops/charts"
 CASES = [
-    # (label, channel, token, refused?)
-    ("none, no token", "none", "", False),
-    ("blueprints, a clean token", "blueprints", TOKEN, False),
-    ("an unknown channel", "blueprint", TOKEN, True),
-    ("blueprints, no token", "blueprints", "", True),
-    ("operators, a token with a trailing newline", "operators", TOKEN + "\n", True),
-    ("pages, a token with a space inside", "pages", TOKEN[:10] + " " + TOKEN[10:], True),
-    ("blueprints, a token with a tab", "blueprints", TOKEN + "\t", True),
+    # (label, channel, token, oci_repo, refused?)
+    ("none, no token", "none", "", PO, False),
+    ("blueprints, a clean token, the blueprints registry", "blueprints", TOKEN, BP, False),
+    ("operators, a clean token, another registry", "operators", TOKEN, PO, False),
+    ("an unknown channel", "blueprint", TOKEN, BP, True),
+    ("blueprints, no token", "blueprints", "", BP, True),
+    ("operators, a token with a trailing newline", "operators", TOKEN + "\n", PO, True),
+    ("pages, a token with a space inside", "pages", TOKEN[:10] + " " + TOKEN[10:], BP, True),
+    ("blueprints, a token with a tab", "blueprints", TOKEN + "\t", BP, True),
+    ("blueprints with oci_repo left at krateo-platformops' default", "blueprints", TOKEN, PO, True),
+    ("pages with oci_repo under the org's old name", "pages", TOKEN, "oci://ghcr.io/krateoplatformops/charts", True),
 ]
 
 
-def run(script, channel, token):
-    env = {"PATH": os.environ["PATH"], "INDEX_CHANNEL": channel, "CHARTS_PUBLISH_TOKEN": token}
+def run(script, channel, token, oci):
+    env = {"PATH": os.environ["PATH"], "INDEX_CHANNEL": channel, "CHARTS_PUBLISH_TOKEN": token, "OCI_REPO": oci}
     p = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
     return p.returncode, p.stdout + p.stderr
 
 
 script = block()
-for label, channel, token, refused in CASES:
-    rc, out = run(script, channel, token)
+for label, channel, token, oci, refused in CASES:
+    rc, out = run(script, channel, token, oci)
     ok = (rc != 0) if refused else (rc == 0)
     leaked = token.strip() and token.strip() in out
     print(f"{'ok  ' if ok and not leaked else 'FAIL'} {'refuses' if refused else 'accepts'}: {label}" + (" (TOKEN PRINTED)" if leaked else ""))
     if not ok or leaked:
         bad.append(label); print(textwrap.indent(out, "      "))
-for label, channel, token, refused in CASES:
+for label, channel, token, oci, refused in CASES:
     if refused:
-        rc, out = run("true", channel, token)
+        rc, out = run("true", channel, token, oci)
         ok = rc == 0
         print(f"{'ok  ' if ok else 'FAIL'} without the preflight, '{label}' is accepted")
         if not ok:

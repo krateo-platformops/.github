@@ -199,6 +199,7 @@ jobs:
         env:
           INDEX_CHANNEL: ${{ inputs.index_channel }}
           CHARTS_PUBLISH_TOKEN: ${{ secrets.charts_publish_token }}
+          OCI_REPO: ${{ inputs.oci_repo }}
         run: |
           # BEGIN index preflight (.github/scripts/release_oci_index_test.py runs it, and deletes it)
           set -euo pipefail
@@ -210,6 +211,16 @@ jobs:
             echo "index_channel none: these charts are deliberately not indexed; no token needed"
             exit 0
           fi
+          # A blueprint or a page set is installed from the krateo-blueprints registry (its CompositionDefinition
+          # names it), so it is pushed there: oci_repo's default is krateo-platformops', and taking it would
+          # push into the wrong organisation. Compared as written (an old org name still resolves).
+          case "${INDEX_CHANNEL}" in
+            blueprints|pages)
+              if [ "${OCI_REPO%/}" != "oci://ghcr.io/krateo-blueprints/charts" ]; then
+                echo "::error::index_channel ${INDEX_CHANNEL} publishes to oci://ghcr.io/krateo-blueprints/charts, but oci_repo is '${OCI_REPO}' (its default is krateo-platformops'). Set oci_repo explicitly. Nothing is pushed."
+                exit 1
+              fi ;;
+          esac
           if [ -z "${CHARTS_PUBLISH_TOKEN}" ]; then
             echo "::error::index_channel ${INDEX_CHANNEL} needs the charts_publish_token secret (CHARTS_PUBLISH_TOKEN), and none was passed. Without it the charts would be pushed and never indexed. Nothing is pushed."
             exit 1
