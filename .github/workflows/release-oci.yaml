@@ -90,11 +90,14 @@
 # What is stamped, and checked: CHART_VERSION in Chart.yaml (version, appVersion, anywhere) and in
 # values.yaml (e.g. an image tag a chart ships at the release version), SOURCE_REF in Chart.yaml,
 # and the CompositionDefinition (ship-cd.sh). A chart opts in purely by authoring a placeholder in
-# those files. After packaging, the PACKAGE about to be pushed is read back and must carry neither
-# placeholder in any of those files: helm semver-checks `version` but accepts any string as
-# `appVersion` or a value, so an unstamped placeholder would otherwise package, push and publish
-# with every step green. Other files are never stamped and never checked: a template may carry the
-# placeholder as text on purpose (portal's builder templates do).
+# those files. After packaging, the PACKAGE about to be pushed is read back: its Chart.yaml must be
+# readable (the check's own control), no placeholder may survive in any member outside templates/
+# (a template may carry it as text on purpose, as portal's builder templates do; a file nothing stamps
+# carrying one is refused, not published literally), and a version or appVersion that authored the
+# placeholder must carry the release version. helm semver-checks `version` but accepts any string as
+# `appVersion` or a value, so without this an unstamped placeholder packaged, pushed and published
+# with every step green. A version written literally is PUBLISHING.md rule 4's other shapes and is
+# left as written; the repository's own guard owns its agreement.
 #
 # dry_run: everything runs (image gate, preflight, discovery, stamping, packaging, the
 # CompositionDefinition check, the stamp check, the registry guard) and nothing is pushed. The
@@ -387,6 +390,11 @@ jobs:
           declare -A without_cd_of=()
           for d in "${charts[@]}"; do
             echo "::group::package ${d}"
+            # Which fields AUTHORED the placeholder, read before stamping: those must carry the release version
+            # afterwards (the stamp check below). A field written literally is PUBLISHING.md rule 4's other
+            # shapes (a chart versioned on its own, e.g. a served API version) and is left as written.
+            ver_placeholder="$(yq -r '.version // ""' "${d}/Chart.yaml" | grep -c -E 'CHART_VERSION' || true)"
+            app_placeholder="$(yq -r '.appVersion // ""' "${d}/Chart.yaml" | grep -c -E 'CHART_VERSION' || true)"
             # Opt-in placeholder substitution (untouched if a placeholder is absent). Global, never anchored
             # on a key: a substitution anchored to `version:` leaves appVersion as the literal placeholder.
             sed -i "s/CHART_VERSION/${CHART_VERSION}/g; s/SOURCE_REF/${CHART_VERSION}/g" "${d}/Chart.yaml"
@@ -484,18 +492,38 @@ jobs:
             echo "provenance: $(basename "${tgz_of[${d}]}") -> ${stamped}"
 
             # BEGIN stamp check (.github/scripts/release_oci_stamp_test.py runs it, and deletes it)
-            # No placeholder may survive in a file this release stamps, read out of the PACKAGE, not the
-            # working tree: an unstamped one would publish with every step green (see the header). It
-            # fails as "about to publish an unstamped placeholder", never as a chart error.
+            # Read out of the PACKAGE about to be pushed, never the working tree (see the header). Three checks,
+            # each failing as "about to publish ...", never as a chart error:
+            #  1. the package's Chart.yaml is readable at <name>/Chart.yaml: every helm package has one, so an
+            #     empty read means the check below would pass by failing to look;
+            #  2. no CHART_VERSION/SOURCE_REF survives in any member outside templates/ (where a template may
+            #     carry the placeholder as text on purpose); a file nothing stamps (e.g. values.schema.json)
+            #     carrying one is refused rather than published literally;
+            #  3. a field that authored the placeholder (version, appVersion) carries the release version.
+            pkg_chart="$(tar -xzOf "${tgz_of[${d}]}" "${cname}/Chart.yaml" 2>/dev/null || true)"
+            if [ -z "${pkg_chart}" ]; then
+              echo "::error::${d}: about to publish without checking it: cannot read ${cname}/Chart.yaml out of $(basename "${tgz_of[${d}]}"), so the stamp check would pass by failing to look. Nothing is pushed."
+              exit 1
+            fi
             survivors=""
-            for f in Chart.yaml values.yaml compositiondefinition.yaml; do
-              body="$(tar -xzOf "${tgz_of[${d}]}" "${cname}/${f}" 2>/dev/null || true)"
-              if [ -n "${body}" ] && grep -q -E 'CHART_VERSION|SOURCE_REF' <<< "${body}"; then
-                survivors="${survivors} ${f}"
+            while IFS= read -r member; do
+              case "${member}" in "${cname}/templates/"*|*/) continue ;; esac
+              if tar -xzOf "${tgz_of[${d}]}" "${member}" 2>/dev/null | grep -q -E 'CHART_VERSION|SOURCE_REF'; then
+                survivors="${survivors} ${member#"${cname}/"}"
               fi
-            done
+            done < <(tar -tzf "${tgz_of[${d}]}")
             if [ -n "${survivors}" ]; then
-              echo "::error::${d}: about to publish an unstamped placeholder: CHART_VERSION or SOURCE_REF survives in${survivors} of $(basename "${tgz_of[${d}]}"). Nothing is pushed."
+              echo "::error::${d}: about to publish an unstamped placeholder: CHART_VERSION or SOURCE_REF survives in${survivors} of $(basename "${tgz_of[${d}]}"). Only Chart.yaml, values.yaml and the CompositionDefinition are stamped. Nothing is pushed."
+              exit 1
+            fi
+            pkg_ver="$(yq -r '.version // ""' <<< "${pkg_chart}")"
+            pkg_app="$(yq -r '.appVersion // ""' <<< "${pkg_chart}")"
+            if [ "${ver_placeholder:-0}" != 0 ] && [ "${pkg_ver}" != "${CHART_VERSION}" ]; then
+              echo "::error::${d}: about to publish the wrong version: version authored the placeholder but the package carries '${pkg_ver}', not the release version '${CHART_VERSION}'. Nothing is pushed."
+              exit 1
+            fi
+            if [ "${app_placeholder:-0}" != 0 ] && [ "${pkg_app}" != "${CHART_VERSION}" ]; then
+              echo "::error::${d}: about to publish the wrong version: appVersion authored the placeholder but the package carries '${pkg_app}', not the release version '${CHART_VERSION}'. Nothing is pushed."
               exit 1
             fi
             # END stamp check

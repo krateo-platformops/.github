@@ -4,15 +4,18 @@ a dry run pushes nothing.
 
 1. The stamp check (the `# BEGIN stamp check` ... `# END stamp check` block, run as written) against
    packages built here:
-     refused  CHART_VERSION left in appVersion, in version, in values.yaml; SOURCE_REF left in Chart.yaml;
-              CHART_VERSION left in compositiondefinition.yaml
-     accepted a fully stamped package; one with no values.yaml; one whose placeholder is only in a
-              template (never stamped, never checked: portal's builder templates carry it on purpose)
+     refused  a placeholder left in appVersion, version, values.yaml, the CompositionDefinition, or a file
+              nothing stamps (values.schema.json); SOURCE_REF left in Chart.yaml; an authored version or
+              appVersion carrying another version; a package whose Chart.yaml is not at <name>/Chart.yaml
+              (the check's own control: it must refuse rather than pass by failing to look)
+     accepted a fully stamped package; one with no values.yaml; a placeholder only in a template (never
+              stamped, never checked: portal's builder templates carry it on purpose); a literal version
+              (PUBLISHING.md rule 4, a chart versioned on its own)
    Then the block is deleted and every refused case must be accepted: they are refused by this check.
 2. Structure, read from the file:
      - package-and-push `needs:` release-preflight (structural order, not textual), which calls
        krateo-blueprints/charts release-preflight.yaml;
-     - the dry-run exit comes before push_chart is defined (no push is reachable in a dry run);
+     - the dry-run exit and the stamp check both come before push_chart is defined;
      - Chart.yaml and values.yaml are stamped with an unanchored global substitution of CHART_VERSION;
      - the package upload runs in both modes.
 """
@@ -31,51 +34,55 @@ def block():
     return textwrap.dedent(m.group(2))
 
 
-def package(path, files):
+def package(path, files, top="demo"):
     with tarfile.open(path, "w:gz") as t:
         for name, body in files.items():
             data = body.encode()
-            ti = tarfile.TarInfo(f"demo/{name}"); ti.size = len(data)
+            ti = tarfile.TarInfo(f"{top}/{name}"); ti.size = len(data)
             t.addfile(ti, io.BytesIO(data))
 
 
 CHART = "apiVersion: v2\nname: demo\nversion: {v}\nappVersion: {a}\n"
+STAMPED = CHART.format(v="1.2.3", a="1.2.3")
+# (label, files, refused?, message the refusal must carry, authored placeholders (version, appVersion), package top dir)
 CASES = [
-    # (label, files, refused?)
-    ("a fully stamped package", {"Chart.yaml": CHART.format(v="1.2.3", a="1.2.3"), "values.yaml": "image:\n  tag: \"1.2.3\"\n"}, False),
-    ("no values.yaml", {"Chart.yaml": CHART.format(v="1.2.3", a="1.2.3")}, False),
-    ("a placeholder only in a template", {"Chart.yaml": CHART.format(v="1.2.3", a="1.2.3"),
-                                          "templates/_builder.tpl": "version: CHART_VERSION\n"}, False),
-    ("CHART_VERSION left in appVersion", {"Chart.yaml": CHART.format(v="1.2.3", a="CHART_VERSION")}, True),
-    ("CHART_VERSION left in version", {"Chart.yaml": CHART.format(v="CHART_VERSION", a="1.2.3")}, True),
-    ("CHART_VERSION left in values.yaml", {"Chart.yaml": CHART.format(v="1.2.3", a="1.2.3"),
-                                           "values.yaml": "image:\n  tag: \"CHART_VERSION\"\n"}, True),
-    ("SOURCE_REF left in Chart.yaml", {"Chart.yaml": CHART.format(v="1.2.3", a="1.2.3") + "annotations:\n  ref: SOURCE_REF\n"}, True),
-    ("CHART_VERSION left in compositiondefinition.yaml", {"Chart.yaml": CHART.format(v="1.2.3", a="1.2.3"),
-                                                          "compositiondefinition.yaml": "spec:\n  chart:\n    version: CHART_VERSION\n"}, True),
+    ("a fully stamped package", {"Chart.yaml": STAMPED, "values.yaml": "image:\n  tag: \"1.2.3\"\n"}, False, "", (1, 1), "demo"),
+    ("no values.yaml", {"Chart.yaml": STAMPED}, False, "", (1, 1), "demo"),
+    ("a placeholder only in a template", {"Chart.yaml": STAMPED, "templates/_builder.tpl": "version: CHART_VERSION\n"}, False, "", (1, 1), "demo"),
+    ("a literal version (PUBLISHING.md rule 4, versioned on its own)", {"Chart.yaml": CHART.format(v="0.7.0", a="2026.1")}, False, "", (0, 0), "demo"),
+    ("CHART_VERSION left in appVersion", {"Chart.yaml": CHART.format(v="1.2.3", a="CHART_VERSION")}, True, "unstamped placeholder", (1, 1), "demo"),
+    ("CHART_VERSION left in version", {"Chart.yaml": CHART.format(v="CHART_VERSION", a="1.2.3")}, True, "unstamped placeholder", (1, 1), "demo"),
+    ("CHART_VERSION left in values.yaml", {"Chart.yaml": STAMPED, "values.yaml": "image:\n  tag: \"CHART_VERSION\"\n"}, True, "unstamped placeholder", (1, 1), "demo"),
+    ("SOURCE_REF left in Chart.yaml", {"Chart.yaml": STAMPED + "annotations:\n  ref: SOURCE_REF\n"}, True, "unstamped placeholder", (1, 1), "demo"),
+    ("CHART_VERSION left in compositiondefinition.yaml", {"Chart.yaml": STAMPED, "compositiondefinition.yaml": "spec:\n  chart:\n    version: CHART_VERSION\n"}, True, "unstamped placeholder", (1, 1), "demo"),
+    ("CHART_VERSION in a file nothing stamps (values.schema.json)", {"Chart.yaml": STAMPED, "values.schema.json": "{\"default\": \"CHART_VERSION\"}\n"}, True, "unstamped placeholder", (1, 1), "demo"),
+    ("an authored version carrying another version", {"Chart.yaml": CHART.format(v="0.1.9", a="1.2.3")}, True, "wrong version", (1, 1), "demo"),
+    ("an authored appVersion carrying another version", {"Chart.yaml": CHART.format(v="1.2.3", a="1.0.0")}, True, "wrong version", (1, 1), "demo"),
+    ("a package whose Chart.yaml is not at <name>/Chart.yaml", {"Chart.yaml": CHART.format(v="1.2.3", a="CHART_VERSION")}, True, "cannot read", (1, 1), "other"),
 ]
 
 
-def run(script, files):
+def run(script, files, placeholders, top):
     d = tempfile.mkdtemp()
     tgz = os.path.join(d, "demo-1.2.3.tgz")
-    package(tgz, files)
-    prog = 'set -euo pipefail\ndeclare -A tgz_of=(); d=chart; tgz_of[chart]="%s"; cname=demo\n%s\necho PASSED\n' % (tgz, script)
+    package(tgz, files, top)
+    prog = ('set -euo pipefail\ndeclare -A tgz_of=(); d=chart; tgz_of[chart]="%s"; cname=demo; CHART_VERSION=1.2.3\n'
+            'ver_placeholder=%d; app_placeholder=%d\n%s\necho PASSED\n') % (tgz, placeholders[0], placeholders[1], script)
     p = subprocess.run(["bash", "-c", prog], capture_output=True, text=True)
     return p.returncode, p.stdout + p.stderr
 
 
 check = block()
-for label, files, refused in CASES:
-    rc, out = run(check, files)
-    ok = (rc != 0 and "unstamped placeholder" in out) if refused else (rc == 0 and "PASSED" in out)
+for label, files, refused, msg, ph, top in CASES:
+    rc, out = run(check, files, ph, top)
+    ok = (rc != 0 and msg in out) if refused else (rc == 0 and "PASSED" in out)
     print(f"{'ok  ' if ok else 'FAIL'} {'refuses' if refused else 'accepts'}: {label}")
     if not ok:
         bad.append(label); print(textwrap.indent(out, "      "))
-for label, files, refused in CASES:
+for label, files, refused, msg, ph, top in CASES:
     if not refused:
         continue
-    rc, out = run("true", files)
+    rc, out = run("true", files, ph, top)
     ok = rc == 0
     print(f"{'ok  ' if ok else 'FAIL'} without the stamp check, '{label}' is accepted")
     if not ok:
@@ -96,6 +103,7 @@ script = next(st["run"] for st in jobs["package-and-push"]["steps"] if st.get("n
 dry = script.find('if [ "${DRY_RUN:-false}" = "true" ]')
 pushdef = script.find("push_chart() {")
 checks.append(("the dry-run exit comes before push_chart is defined", 0 <= dry < pushdef))
+checks.append(("the stamp check comes before push_chart is defined", 0 <= script.find("# BEGIN stamp check") < pushdef))
 checks.append(("Chart.yaml is stamped with a global, unanchored substitution",
                re.search(r'sed -i "s/CHART_VERSION/\$\{CHART_VERSION\}/g; s/SOURCE_REF/\$\{CHART_VERSION\}/g" "\$\{d\}/Chart.yaml"', script) is not None))
 checks.append(("values.yaml is stamped with a global, unanchored substitution",
