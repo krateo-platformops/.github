@@ -93,7 +93,7 @@ checks = [
      str(jobs.get("release-preflight", {}).get("uses", "")).startswith("krateo-blueprints/charts/.github/workflows/release-preflight.yaml@")),
 ]
 script = next(st["run"] for st in jobs["package-and-push"]["steps"] if st.get("name", "").startswith("Discover, version, package"))
-dry = script.find('if [ "${DRY_RUN}" = "true" ]')
+dry = script.find('if [ "${DRY_RUN:-false}" = "true" ]')
 pushdef = script.find("push_chart() {")
 checks.append(("the dry-run exit comes before push_chart is defined", 0 <= dry < pushdef))
 checks.append(("Chart.yaml is stamped with a global, unanchored substitution",

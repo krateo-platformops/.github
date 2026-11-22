@@ -78,8 +78,8 @@ run_step() { # $1=script $2=fixture repo; env passed through. Sets $rc, $log.
   (cd "$wd" && bash --noprofile --norc -eo pipefail "$1") >"$log" 2>&1
   rc=$?
 }
-release() { # $1=fixture repo; uses $OCI, $CV, $AV, $SHA
-  CHART_VERSION="$CV" APP_VERSION="$AV" CHART_ROOT=. OCI_REPO="$OCI" \
+release() { # $1=fixture repo; uses $OCI, $CV, $AV, $SHA, and $DRY (dry_run, default false)
+  DRY_RUN="${DRY:-false}" CHART_VERSION="$CV" APP_VERSION="$AV" CHART_ROOT=. OCI_REPO="$OCI" \
     CHART_VERSION_GUARD="$here/guard.sh" SHIP_CD="$here/ship-cd.sh" CHART_PUSH="$root/.github/actions/chart-push/push.sh" REGISTRY_HOST=ghcr.io REGISTRY_USERNAME="" REGISTRY_PASSWORD="" \
     GIT_SHA="$SHA" SRC_URL="https://github.com/krateo-platformops/fixture" SRC_REF="$CV" \
     run_step "$tmp/release.sh" "$1"
@@ -110,6 +110,11 @@ expect() { # $1=case $2=want exit (0, fail, or any: not checked) then any number
 # --- release-oci: push / skip / refuse -----------------------------------------------------------
 
 OCI="$ns" CV=3.1.31 AV="" SHA=1111111111111111111111111111111111111111
+# A dry run, first, against the empty registry: every check runs, nothing is pushed, nothing appears.
+DRY=true release "$src"
+expect "release: a dry run pushes nothing" 0 "+dry run: nothing pushed" "-Pushing" "-done: pushed"
+expect "release: ... and nothing is in the registry" any "=$(digest app 0.1.0)=absent" "=$(digest app-crds 0.1.0)=absent" "=$(digest other 0.2.0)=absent"
+DRY=false
 release "$src"
 expect "release: first tag publishes every chart" 0 "+Pushing" "+done: pushed 3, skipped 0"
 app1="$(digest app 0.1.0)"; crds1="$(digest app-crds 0.1.0)"; other1="$(digest other 0.2.0)"

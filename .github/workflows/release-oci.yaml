@@ -556,7 +556,7 @@ jobs:
           fi
 
           # A dry run stops here: every check has run, nothing is pushed.
-          if [ "${DRY_RUN}" = "true" ]; then
+          if [ "${DRY_RUN:-false}" = "true" ]; then
             echo "::notice::dry run: nothing pushed. Would push: $(for d in "${charts[@]}"; do [ -z "${skip_of[${d}]:-}" ] && printf '%s ' "$(basename "${tgz_of[${d}]}")"; done)| already published, identical: ${#skip_of[@]}"
             exit 0
           fi
