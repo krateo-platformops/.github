@@ -13,9 +13,9 @@
      - the index gate call is guarded by the channel not being none, comes after the packaging loop and before
        the registry guard (and so before any push), and runs the index-gate action located in an earlier step;
      - the index-gate action, the nested release-preflight and publish-chart are pinned to one charts commit;
-     - after the push: collect (only for a channel, outside a dry run, when something was pushed) pulls back
-       the pushed charts and publish-index indexes that artifact with the token;
-3. The pushed output block, run as written: every chart published at its version is listed by its package's
+     - after the push: collect (only for a channel, outside a dry run, when the release has charts) pulls back
+       the release's charts and publish-index indexes that artifact with the token;
+3. The release charts output block, run as written: every chart published at its version is listed by its package's
    name and version, pushed or skipped as already published, so re-running a release that pushed but did not
    index finishes it.
 """
@@ -102,10 +102,10 @@ publish = jobs.get("publish-index", {})
 cif = str(collect.get("if", ""))
 upload = [st for st in collect.get("steps", []) if str(st.get("uses", "")).startswith("actions/upload-artifact")]
 checks += [
-    ("package-and-push outputs the pushed charts", "pushed" in jobs["package-and-push"].get("outputs", {})),
+    ("package-and-push outputs the release's charts", "release_charts" in jobs["package-and-push"].get("outputs", {})),
     ("collect runs after package-and-push", "package-and-push" in (collect.get("needs") if isinstance(collect.get("needs"), list) else [collect.get("needs")])),
-    ("collect runs only for a channel, outside a dry run, and when something was pushed",
-     "inputs.index_channel != 'none'" in cif and "!inputs.dry_run" in cif and "outputs.pushed != '[]'" in cif),
+    ("collect runs only for a channel, outside a dry run, and when the release has charts",
+     "inputs.index_channel != 'none'" in cif and "!inputs.dry_run" in cif and "outputs.release_charts != '[]'" in cif),
     ("publish-index runs after collect and calls charts' publish-chart",
      publish.get("needs") in (["collect"], "collect") and str(publish.get("uses", "")).startswith("krateo-blueprints/charts/.github/workflows/publish-chart.yaml@")),
     ("publish-index indexes collect's artifact, with the publish token",
@@ -113,12 +113,12 @@ checks += [
      and "secrets.charts_publish_token" in str(publish.get("secrets", {}).get("PUBLISH_TOKEN", ""))),
 ]
 
-# The pushed output block, run as written: pushed charts in, skipped charts out, names from the PACKAGE.
+# The release charts output block, run as written: every published chart in (pushed or skipped), names from the PACKAGE.
 import io, tarfile, tempfile, json
-m = re.search(r"\n[ \t]*# BEGIN pushed output.*?\n(.*?)\n[ \t]*# END pushed output", TEXT, re.S)
+m = re.search(r"\n[ \t]*# BEGIN release charts output.*?\n(.*?)\n[ \t]*# END release charts output", TEXT, re.S)
 if not m:
-    sys.exit("VOID: the pushed output block is not marked")
-pushed_block = textwrap.dedent(m.group(1))
+    sys.exit("VOID: the release charts output block is not marked")
+output_block = textwrap.dedent(m.group(1))
 work = tempfile.mkdtemp()
 def pkg(dirname, name, version):
     os.makedirs(os.path.join(work, dirname), exist_ok=True)
@@ -139,10 +139,10 @@ for label, skipped, want in (
     prog = (f'set -euo pipefail\ncd "{work}"\ncharts=(chart config-chart charts/old)\n'
             f'declare -A tgz_of=([chart]="{a}" [config-chart]="{b}" [charts/old]="{c}")\n'
             'declare -A ok_of=([chart]=1 [config-chart]=1 [charts/old]=1)\ndeclare -A skip_of=()\n'
-            f'{skip_decl}\nGITHUB_OUTPUT="{work}/out"; : > "$GITHUB_OUTPUT"\n{pushed_block}\n')
+            f'{skip_decl}\nGITHUB_OUTPUT="{work}/out"; : > "$GITHUB_OUTPUT"\n{output_block}\n')
     p = subprocess.run(["bash", "-c", prog], capture_output=True, text=True)
     out = open(os.path.join(work, "out")).read().strip() if os.path.exists(os.path.join(work, "out")) else ""
-    got = json.loads(out.split("=", 1)[1]) if out.startswith("pushed=") else None
+    got = json.loads(out.split("=", 1)[1]) if out.startswith("release_charts=") else None
     checks.append((label, p.returncode == 0 and got == want))
     if got != want:
         print(p.stdout + p.stderr, "got:", got)

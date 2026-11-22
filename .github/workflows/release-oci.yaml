@@ -261,7 +261,7 @@ jobs:
     outputs:
       # Every chart of this release, as a JSON array of {name, version}: pushed by this run, or already
       # published with identical contents (see the header).
-      pushed: ${{ steps.release.outputs.pushed }}
+      release_charts: ${{ steps.release.outputs.release_charts }}
     runs-on: ubuntu-latest
     # One check-and-push at a time per repository. Without it, two releases of one repo that overlap,
     # e.g. two tags pushed close together, or a tag and a workflow_dispatch, could both find a
@@ -735,20 +735,20 @@ jobs:
           fi
           echo "done: pushed $(( ${#ok_of[@]} - ${#skip_of[@]} )), skipped ${#skip_of[@]} already published with identical contents, of ${#charts[@]} chart(s)"
 
-          # BEGIN pushed output (.github/scripts/release_oci_index_test.py runs it)
+          # BEGIN release charts output (.github/scripts/release_oci_index_test.py runs it)
           # What publish-index indexes: every chart of this release that is published at its version, pushed by
           # this run or already published with identical contents, each with the name and version its package
           # carries. A chart that failed to push is not (the run fails anyway). See the header.
-          pushed='[]'
+          release_charts='[]'
           for d in "${charts[@]}"; do
             if [ -n "${ok_of[${d}]:-}" ]; then
               meta="$(tar -xzOf "${tgz_of[${d}]}" "$(yq -r '.name' "${d}/Chart.yaml")/Chart.yaml")"
-              pushed="$(jq -c --arg n "$(yq -r '.name' <<< "${meta}")" --arg v "$(yq -r '.version' <<< "${meta}")" '. + [{name: $n, version: $v}]' <<< "${pushed}")"
+              release_charts="$(jq -c --arg n "$(yq -r '.name' <<< "${meta}")" --arg v "$(yq -r '.version' <<< "${meta}")" '. + [{name: $n, version: $v}]' <<< "${release_charts}")"
             fi
           done
-          echo "pushed=${pushed}" >> "${GITHUB_OUTPUT:-/dev/null}"
-          echo "to index: ${pushed}"
-          # END pushed output
+          echo "release_charts=${release_charts}" >> "${GITHUB_OUTPUT:-/dev/null}"
+          echo "to index: ${release_charts}"
+          # END release charts output
 
       # The packages this run built, in both modes: a rehearsal's proof of what it would have pushed,
       # and a release's record of what it did (see the header).
@@ -760,17 +760,18 @@ jobs:
           path: dist/*.tgz
           if-no-files-found: error
 
-  # Pull back from GHCR exactly the charts this run pushed, so the index stores the registry's bytes (see the header).
+  # Pull back from GHCR exactly the release's charts (pushed by this run or already published), so the index stores
+  # the registry's bytes (see the header).
   collect:
     needs: [package-and-push]
-    if: ${{ inputs.index_channel != 'none' && !inputs.dry_run && needs.package-and-push.outputs.pushed != '[]' }}
+    if: ${{ inputs.index_channel != 'none' && !inputs.dry_run && needs.package-and-push.outputs.release_charts != '[]' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: read
     env:
       OCI_REPO: ${{ inputs.oci_repo }}
-      PUSHED: ${{ needs.package-and-push.outputs.pushed }}
+      RELEASE_CHARTS: ${{ needs.package-and-push.outputs.release_charts }}
     steps:
       - name: Helm setup
         uses: azure/setup-helm@v5.0.0
@@ -778,7 +779,7 @@ jobs:
           version: v3.19.0
       - name: Registry login
         run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
-      - name: Pull every pushed chart back, and assert the set
+      - name: Pull every chart of the release back, and assert the set
         run: |
           set -euo pipefail
           mkdir -p index-dist
@@ -786,7 +787,7 @@ jobs:
           while IFS=$'\t' read -r name version; do
             helm pull "${OCI_REPO}/${name}" --version "${version}" -d index-dist
             want+=("${name}-${version}.tgz")
-          done < <(jq -r '.[] | [.name, .version] | @tsv' <<< "${PUSHED}")
+          done < <(jq -r '.[] | [.name, .version] | @tsv' <<< "${RELEASE_CHARTS}")
           got="$(find index-dist -maxdepth 1 -type f -name '*.tgz' -exec basename {} \; | sort | tr '\n' ' ')"
           exp="$(printf '%s\n' "${want[@]}" | sort | tr '\n' ' ')"
           if [ "${got}" != "${exp}" ]; then
