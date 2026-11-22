@@ -1,0 +1,36 @@
+# NOT reusable: this repo's own check that release-oci.yaml never publishes an unstamped placeholder,
+# runs the repository's preflight before any push, and pushes nothing in a dry run
+# (.github/scripts/release_oci_stamp_test.py: stamp cases run against the workflow's own check, its
+# deletion, and the structural order of preflight, dry-run exit and push).
+name: test-release-oci-stamp
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/release-oci.yaml"
+      - ".github/workflows/test-release-oci-stamp.yaml"
+      - ".github/scripts/release_oci_stamp_test.py"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/release-oci.yaml"
+      - ".github/workflows/test-release-oci-stamp.yaml"
+      - ".github/scripts/release_oci_stamp_test.py"
+
+permissions:
+  contents: read
+
+jobs:
+  release-oci-stamp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: no placeholder survives, preflight before push, a dry run pushes nothing
+        run: |
+          set -euo pipefail
+          python3 -m venv /tmp/venv
+          /tmp/venv/bin/pip install --quiet "pyyaml==6.0.2"
+          PYTHONDONTWRITEBYTECODE=1 /tmp/venv/bin/python -I .github/scripts/release_oci_stamp_test.py .
