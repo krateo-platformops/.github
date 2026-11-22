@@ -123,9 +123,13 @@ jobs:
           # the generic-api-key / entropy heuristics on example identifiers and template syntax.
           # Real secrets in source (values.yaml, code, config) are still caught. Repo-specific
           # accepted findings live in a repo-level .gitleaksignore (also honoured below) -- which is
-          # for GENUINELY ONE-OFF cases only. A finding that recurs (a published upstream constant, a
-          # vendored default) must be allowlisted by path or pattern ABOVE instead: a fingerprint is
-          # commit:file:rule:line and survives nothing, where a pattern survives a line moving (#32).
+          # for GENUINELY ONE-OFF cases only, above all a finding that exists only in history because it
+          # was fixed forward: git mode reports a secret once, at the commit that introduced it, and a
+          # commit never changes, so that fingerprint is stable. A finding that recurs in the working
+          # tree (a published upstream constant, a vendored default) must be allowlisted by path or
+          # pattern ABOVE instead: its fingerprint is commit:file:rule:line and changes whenever the
+          # line moves, where a pattern survives that (#32). A path allowlist for a one-off would blind
+          # the scan to every future secret in that file.
           cat > /tmp/krateo-gitleaks.toml <<'TOML'
           title = "krateo-gitleaks"
           [extend]
@@ -242,7 +246,7 @@ jobs:
             if [ -s /tmp/gitleaks.json ]; then
               echo "::error::gitleaks found $(jq -r 'length' /tmp/gitleaks.json) finding(s); identifying fields only, values stay redacted:"
               jq -r '.[] | "  \(.RuleID)  \(.File):\(.StartLine)  fingerprint=\(.Fingerprint)"' /tmp/gitleaks.json
-              echo "::error::A published upstream constant that RECURS belongs in this workflow's allowlist by path or pattern, not in a repo .gitleaksignore whose commit:file:rule:line fingerprint stops matching when the line moves."
+              echo "::error::Rotate a live credential first, and never allowlist one that is still in use. Then: a finding ONLY IN HISTORY (already fixed forward) is accepted with its fingerprint above in the repository's .gitleaksignore, with a # comment giving the reason; a commit never changes, so that fingerprint never stops matching. A value that RECURS in the working tree (a published upstream constant, a vendored default) belongs in this workflow's allowlist by path or pattern instead, because its fingerprint (commit:file:rule:line) changes whenever the line moves."
             else
               # A non-zero exit with no report is NOT a clean scan and must not read as one: it means
               # gitleaks could not run (bad config, failed download). Say which it was, or a broken
