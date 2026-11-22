@@ -215,7 +215,7 @@ jobs:
             done < <(grep -oE 'image: *"?[A-Za-z0-9._/-]+:[A-Za-z0-9._-]+"?' "$rendered" \
                       | sed -E 's/^image: *"?//; s/"?$//' | sort -u)
           # Same prune list and vendored rule as release-oci.yaml's discovery; the root is never pruned.
-          done < <(find "${CHART_ROOT:-.}" -mindepth 1 \( -name .git -o -name node_modules -o -name examples -o -name example -o -name __fixtures__ -o -name fixtures -o -name testdata -o -name test -o -name tests -o -name docs \) -prune -o -name Chart.yaml -print | sort)
+          done < <(find "${CHART_ROOT:-.}" -mindepth 1 \( -name .git -o -name node_modules -o -name examples -o -name example -o -name __fixtures__ -o -name fixtures -o -name testdata -o -name test -o -name tests -o -name e2e -o -name sample -o -name samples -o -name docs \) -prune -o -name Chart.yaml -print | sort)
 
           echo "checked ${checked} image reference(s) across ${charts} chart(s)"
           if [ "$failed" -gt 0 ]; then

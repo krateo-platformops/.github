@@ -14,7 +14,9 @@ Then three mutants, each of which some refused case must notice: the check delet
 `[0-9]+\\.[0-9]+\\.[0-9]+` (github-provider-kog#111's form), and each pre-release identifier loosened to
 `[0-9A-Za-z-]+` (which accepts 1.2.3-01; SemVer 2.0 section 9 forbids a leading zero in a numeric identifier). Last, CORE must be the three groups of krateo-blueprints/charts'
 PLAIN_VERSION byte for byte (`^` + CORE + `$` == PLAIN_VERSION), read from charts' release-preflight.yaml and
-publish-chart.yaml at the given charts ref (default main; CHARTS_REF overrides), so the two cannot drift.
+its index gate (.github/actions/index-gate/gate.sh, which publish-chart runs since charts 1.9.1) at the charts
+commit release-oci.yaml itself pins (its nested release-preflight; CHARTS_REF overrides), so the two cannot drift
+and a change on charts' main cannot break this test before release-oci moves its pin.
 Fails (exit 2) when the step, the marked block or charts' definition cannot be read.
 """
 import os
@@ -29,7 +31,13 @@ import yaml
 ROOT = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else ".")
 WF = os.path.join(ROOT, ".github", "workflows", "release-oci.yaml")
 STEP = "Resolve versions"
-CHARTS_REF = os.environ.get("CHARTS_REF", "main")
+def pinned_charts_ref():
+    text = open(os.path.join(sys.argv[1] if len(sys.argv) > 1 else ".", ".github", "workflows", "release-oci.yaml")).read()
+    pins = re.findall(r"uses:\s*krateo-blueprints/charts/\.github/workflows/release-preflight\.yaml@([0-9a-f]{40})", text)
+    return pins[0] if len(pins) == 1 else None
+
+
+CHARTS_REF = os.environ.get("CHARTS_REF") or pinned_charts_ref()
 OK = ["1.2.3", "0.0.0", "10.20.30", "0.15.0", "1.2.3-rc.1", "1.2.3-main.gabc1234", "0.3.74-dev.g0123abc", "1.0.0-alpha",
       "1.2.3-0", "1.2.3-0a", "1.2.3-x-y", "1.2.3-rc.0", "1.2.3--"]
 BAD = ["0.015.0", "01.2.3", "1.02.3", "v1.2.3", "1.2.3+build.5", "1.2.3-rc.1+b", "1.2", "1.2.3.4", "1.2.3-",
@@ -97,8 +105,10 @@ for label, text in mutants:
 
 # One definition with charts' rule 13.
 core = cores[0][1]
-for f in ("release-preflight.yaml", "publish-chart.yaml"):
-    url = "https://raw.githubusercontent.com/krateo-blueprints/charts/%s/.github/workflows/%s" % (CHARTS_REF, f)
+if not CHARTS_REF:
+    measurement_failed("release-oci.yaml pins no single krateo-blueprints/charts release-preflight commit")
+for f in (".github/workflows/release-preflight.yaml", ".github/actions/index-gate/gate.sh"):
+    url = "https://raw.githubusercontent.com/krateo-blueprints/charts/%s/%s" % (CHARTS_REF, f)
     try:
         text = urllib.request.urlopen(url, timeout=30).read().decode()
     except OSError as err:
