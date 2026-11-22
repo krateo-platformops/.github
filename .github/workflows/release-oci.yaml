@@ -121,11 +121,13 @@
 #   • every package passes the index's own content gate (krateo-blueprints/charts index-gate, the definition
 #     publish-chart runs: right channel, complete archive, sources, plain version), so a chart the index
 #     would refuse never reaches the registry.
-# And after the push (not in a dry run), the charts this run PUSHED are indexed here, so one call both
+# And after the push (not in a dry run), EVERY chart of the release is indexed here, so one call both
 # pushes and indexes: the collect job pulls each back from GHCR at its version, so the index stores the
 # registry's exact bytes (PUBLISHING.md rule 1; a repackage has fresh mtimes), and publish-index calls
-# krateo-blueprints/charts publish-chart with them. A chart skipped as already published with identical
-# contents is not sent: its first release indexed it, and the publisher refuses an already-stored version.
+# krateo-blueprints/charts publish-chart with them. A chart skipped as already published IS sent too: if an
+# earlier run pushed it and then failed to index it, re-running the release is what finishes that half-done
+# release, and the publisher is idempotent for the repository that owns a version (it re-stores the same
+# bytes, and an already-indexed version changes nothing). It refuses only another repository's version.
 #
 # Migrating to 2.0.0 from a repository's own release (repository standard R5):
 #   1. grep the repository for the old workflow's FILENAME first (e.g. release-tag.yaml): a script or a check
@@ -257,7 +259,8 @@ jobs:
   package-and-push:
     needs: [verify-images, release-preflight, index-preflight]
     outputs:
-      # The charts this run pushed, as a JSON array of {name, version}; skipped (already published) excluded.
+      # Every chart of this release, as a JSON array of {name, version}: pushed by this run, or already
+      # published with identical contents (see the header).
       pushed: ${{ steps.release.outputs.pushed }}
     runs-on: ubuntu-latest
     # One check-and-push at a time per repository. Without it, two releases of one repo that overlap,
@@ -733,11 +736,12 @@ jobs:
           echo "done: pushed $(( ${#ok_of[@]} - ${#skip_of[@]} )), skipped ${#skip_of[@]} already published with identical contents, of ${#charts[@]} chart(s)"
 
           # BEGIN pushed output (.github/scripts/release_oci_index_test.py runs it)
-          # What publish-index indexes: the charts pushed by THIS run, each with the name and version its package
-          # carries. A skipped chart is excluded (see the header).
+          # What publish-index indexes: every chart of this release that is published at its version, pushed by
+          # this run or already published with identical contents, each with the name and version its package
+          # carries. A chart that failed to push is not (the run fails anyway). See the header.
           pushed='[]'
           for d in "${charts[@]}"; do
-            if [ -n "${ok_of[${d}]:-}" ] && [ -z "${skip_of[${d}]:-}" ]; then
+            if [ -n "${ok_of[${d}]:-}" ]; then
               meta="$(tar -xzOf "${tgz_of[${d}]}" "$(yq -r '.name' "${d}/Chart.yaml")/Chart.yaml")"
               pushed="$(jq -c --arg n "$(yq -r '.name' <<< "${meta}")" --arg v "$(yq -r '.version' <<< "${meta}")" '. + [{name: $n, version: $v}]' <<< "${pushed}")"
             fi

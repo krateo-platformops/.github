@@ -15,8 +15,9 @@
      - the index-gate action, the nested release-preflight and publish-chart are pinned to one charts commit;
      - after the push: collect (only for a channel, outside a dry run, when something was pushed) pulls back
        the pushed charts and publish-index indexes that artifact with the token;
-3. The pushed output block, run as written: a pushed chart is listed by its package's name and version, a
-   skipped chart is not, and nothing pushed lists nothing.
+3. The pushed output block, run as written: every chart published at its version is listed by its package's
+   name and version, pushed or skipped as already published, so re-running a release that pushed but did not
+   index finishes it.
 """
 import os, re, subprocess, sys, textwrap
 import yaml
@@ -129,9 +130,10 @@ def pkg(dirname, name, version):
     return tgz
 a = pkg("chart", "demo", "1.2.3"); b = pkg("config-chart", "demo-config", "1.2.3"); c = pkg("charts/old", "old", "0.7.0")
 for label, skipped, want in (
-    ("a pushed chart is listed by its package's name and version; a skipped one is not",
-     "config-chart charts/old", [{"name": "demo", "version": "1.2.3"}]),
-    ("nothing pushed lists nothing", "chart config-chart charts/old", []),
+    ("a pushed chart and a skipped (already published) one are both listed, by their package's name",
+     "config-chart charts/old", [{"name": "demo", "version": "1.2.3"}, {"name": "demo-config", "version": "1.2.3"}, {"name": "old", "version": "0.7.0"}]),
+    ("all skipped still lists every chart, so a re-run indexes a half-done release", "chart config-chart charts/old",
+     [{"name": "demo", "version": "1.2.3"}, {"name": "demo-config", "version": "1.2.3"}, {"name": "old", "version": "0.7.0"}]),
 ):
     skip_decl = " ".join(f'skip_of["{d}"]=1;' for d in skipped.split())
     prog = (f'set -euo pipefail\ncd "{work}"\ncharts=(chart config-chart charts/old)\n'
