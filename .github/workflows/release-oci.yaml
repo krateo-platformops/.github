@@ -12,7 +12,10 @@
 #   • vendored deps:       chart/charts/<dep>  (SKIPPED — grandparent is itself a chart)
 #
 # What it never publishes: a Chart.yaml under a directory named examples, example, __fixtures__,
-# fixtures, testdata, test, tests, docs or node_modules. Those hold charts that exist to be READ — a
+# fixtures, testdata, test, tests, e2e, sample, samples, docs or node_modules. That list must contain every
+# directory the repository standard (krateo-blueprints/charts repository-standard.yaml, FIXTURE) treats as a
+# fixture, or a repository that passes the standard would have a fixture chart released here;
+# .github/scripts/prune_agreement_test.py reads the standard at the charts commit this file pins and checks it. Those hold charts that exist to be READ — a
 # test fixture, a documented example — and every one of them used to be packaged at the release
 # version and pushed to the org registry. On frontend 1.6.57 a fixture named `builder-publish` (a real
 # package owned by another repo) was refused with a 403, and the job died before pushing the repo's
@@ -108,6 +111,28 @@
 # did; a caller makes its manual run safe by giving its own workflow_dispatch input `dry_run` a
 # default of true and passing `dry_run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}`.
 #
+# index_channel (REQUIRED, 2.0.0): blueprints, pages, operators, or none. A chart left out of the
+# krateo-blueprints index must be a statement someone wrote (`none`), not an omitted input: an optional
+# check silently protects nothing for a caller who forgets it, and that is how a chart ends up pushed but
+# never indexed (github-provider-kog#111). For any channel but none, before anything is pushed:
+#   • the index-preflight job refuses an absent `charts_publish_token` secret and one containing whitespace
+#     anywhere (a trailing newline breaks the publisher after the push). It tests presence and shape only and
+#     never prints or uses the value: a green check does NOT prove the token is valid or correctly scoped;
+#   • every package passes the index's own content gate (krateo-blueprints/charts index-gate, the definition
+#     publish-chart runs: right channel, complete archive, sources, plain version), so a chart the index
+#     would refuse never reaches the registry.
+#
+# Migrating to 2.0.0 from a repository's own release (repository standard R5):
+#   1. grep the repository for the old workflow's FILENAME first (e.g. release-tag.yaml): a script or a check
+#      that reads it (a path, a pin read out of it) stops gating the moment it is deleted while every check
+#      stays green. Retire or re-point each one on purpose, in the same change;
+#   2. call this workflow with index_channel (and charts_publish_token: secrets.CHARTS_PUBLISH_TOKEN for any
+#      channel but none) and oci_repo set explicitly (a krateo-blueprints repository:
+#      oci://ghcr.io/krateo-blueprints/charts), and give the caller's workflow_dispatch a dry_run input
+#      defaulting to true;
+#   3. drop the repository's own release-preflight job, which this workflow now runs itself.
+# From 1.x: add index_channel, the only breaking change.
+#
 # What this workflow deliberately does not do, and where it lives instead:
 #   • Release notes, assets on the caller's GitHub release: a called workflow's permissions are capped
 #     at its caller's and this one is `contents: read`, so they are TOP-LEVEL jobs of the caller
@@ -140,16 +165,57 @@ on:
         description: "Run every check and build every package, push nothing (see the header). Default false: a tag push publishes."
         type: boolean
         default: false
+      index_channel:
+        description: "The krateo-blueprints index channel these charts are published to: blueprints, pages, operators, or none (deliberately not indexed). Required (see the header)."
+        type: string
+        required: true
       preflight_working_directory:
         description: "Directory holding hack/release-preflight, relative to the repository root (PUBLISHING.md rule 12)."
         type: string
         default: "."
+
+    secrets:
+      charts_publish_token:
+        description: "CHARTS_PUBLISH_TOKEN, required for any index_channel but none. Checked for presence and shape only, never used here."
+        required: false
 
 permissions:
   contents: read
   packages: write
 
 jobs:
+  # The index's preconditions, before anything is pushed (see the header): a known channel, and for any
+  # channel but none, a token that is present and contains no whitespace. Presence and shape only.
+  index-preflight:
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Index channel and token
+        env:
+          INDEX_CHANNEL: ${{ inputs.index_channel }}
+          CHARTS_PUBLISH_TOKEN: ${{ secrets.charts_publish_token }}
+        run: |
+          # BEGIN index preflight (.github/scripts/release_oci_index_test.py runs it, and deletes it)
+          set -euo pipefail
+          case "${INDEX_CHANNEL}" in
+            blueprints|pages|operators|none) ;;
+            *) echo "::error::index_channel '${INDEX_CHANNEL}' is not blueprints, pages, operators or none. Nothing is pushed."; exit 1 ;;
+          esac
+          if [ "${INDEX_CHANNEL}" = none ]; then
+            echo "index_channel none: these charts are deliberately not indexed; no token needed"
+            exit 0
+          fi
+          if [ -z "${CHARTS_PUBLISH_TOKEN}" ]; then
+            echo "::error::index_channel ${INDEX_CHANNEL} needs the charts_publish_token secret (CHARTS_PUBLISH_TOKEN), and none was passed. Without it the charts would be pushed and never indexed. Nothing is pushed."
+            exit 1
+          fi
+          if [[ "${CHARTS_PUBLISH_TOKEN}" =~ [[:space:]] ]]; then
+            echo "::error::charts_publish_token contains whitespace (a trailing newline breaks the publisher after the push). Re-set the secret without it. Nothing is pushed."
+            exit 1
+          fi
+          echo "index_channel ${INDEX_CHANNEL}: a token is present and has no whitespace (presence and shape only, not validity)"
+          # END index preflight
+
   # Gate: a chart referencing an image that does not exist publishes cleanly and then
   # ImagePullBackOffs on every install, several layers from the cause (oasgen-provider#62).
   # Nested rather than inlined so the check has ONE definition shared with the PR-time caller.
@@ -165,7 +231,7 @@ jobs:
 
   # The repository's own preflight, strictly before anything is pushed (see the header).
   release-preflight:
-    uses: krateo-blueprints/charts/.github/workflows/release-preflight.yaml@0794359c611fc736f101ecc64d3a86e0ddcad718 # 1.8.0
+    uses: krateo-blueprints/charts/.github/workflows/release-preflight.yaml@b1326a80e621974dc47632c2519941b30e714af5 # 1.9.1
     permissions:
       contents: read
     with:
@@ -173,7 +239,7 @@ jobs:
       working-directory: ${{ inputs.preflight_working_directory }}
 
   package-and-push:
-    needs: [verify-images, release-preflight]
+    needs: [verify-images, release-preflight, index-preflight]
     runs-on: ubuntu-latest
     # One check-and-push at a time per repository. Without it, two releases of one repo that overlap,
     # e.g. two tags pushed close together, or a tag and a workflow_dispatch, could both find a
@@ -342,6 +408,12 @@ jobs:
         id: push
         uses: krateo-platformops/.github/.github/actions/chart-push@88eaff13555233606da5ff3ff3bfed8f534436ce # main 2026-11-18
 
+      # The index's own content gate (see the header), the definition publish-chart runs. Located here, run by
+      # the step below after packaging and before anything is pushed, for any index_channel but none.
+      - name: Index gate
+        id: index-gate
+        uses: krateo-blueprints/charts/.github/actions/index-gate@b1326a80e621974dc47632c2519941b30e714af5 # 1.9.1
+
       - name: Discover, version, package & push every first-class chart
         env:
           CHART_VERSION_GUARD: ${{ steps.guard.outputs.path }}
@@ -358,6 +430,8 @@ jobs:
           SRC_URL: ${{ github.server_url }}/${{ github.repository }}
           SRC_REF: ${{ github.ref_name }}
           DRY_RUN: ${{ inputs.dry_run }}
+          INDEX_CHANNEL: ${{ inputs.index_channel }}
+          INDEX_GATE: ${{ steps.index-gate.outputs.path }}
         run: |
           set -euo pipefail
           if [ ! -d "${CHART_ROOT:-.}" ]; then
@@ -376,7 +450,7 @@ jobs:
               continue
             fi
             charts+=("$d")
-          done < <(find "${CHART_ROOT:-.}" -mindepth 1 \( -name .git -o -name node_modules -o -name examples -o -name example -o -name __fixtures__ -o -name fixtures -o -name testdata -o -name test -o -name tests -o -name docs \) -prune -o -name Chart.yaml -print | sort)
+          done < <(find "${CHART_ROOT:-.}" -mindepth 1 \( -name .git -o -name node_modules -o -name examples -o -name example -o -name __fixtures__ -o -name fixtures -o -name testdata -o -name test -o -name tests -o -name e2e -o -name sample -o -name samples -o -name docs \) -prune -o -name Chart.yaml -print | sort)
 
           if [ "${#charts[@]}" -eq 0 ]; then
             echo "::error::no first-class charts found"; exit 1
@@ -529,6 +603,19 @@ jobs:
             # END stamp check
             echo "::endgroup::"
           done
+
+          # BEGIN index gate call (.github/scripts/release_oci_index_test.py checks its place and guard)
+          # The index's own rules, on every package, before anything is pushed (see the header). The input is
+          # required, so the default below is never reached in a release; it exists for the step's self-tests.
+          if [ "${INDEX_CHANNEL:-none}" != none ]; then
+            echo "::group::index gate (${INDEX_CHANNEL})"
+            if ! CHANNEL="${INDEX_CHANNEL}" SRC="${GITHUB_REPOSITORY}" bash "${INDEX_GATE}" dist; then
+              echo "::error::the index would refuse these charts in ${INDEX_CHANNEL} (above). Nothing is pushed."
+              exit 1
+            fi
+            echo "::endgroup::"
+          fi
+          # END index gate call
 
           # Ask the registry about every package before pushing any (see the header). A refusal or a
           # failed check stops the whole release, as a packaging failure does: a release that would

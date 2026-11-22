@@ -1,0 +1,42 @@
+# NOT reusable: this repo's own check that release-oci.yaml (2.0.0) checks the index's preconditions before
+# anything is pushed (.github/scripts/release_oci_index_test.py: the preflight run as written over channel and
+# token cases, its deletion, and the gate call's place and guard), and that it never publishes a chart the
+# repository standard calls a fixture (.github/scripts/prune_agreement_test.py, reading the standard at the
+# krateo-blueprints/charts commit release-oci pins).
+name: test-release-oci-index
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/release-oci.yaml"
+      - ".github/workflows/chart-images.yaml"
+      - ".github/workflows/test-release-oci-index.yaml"
+      - ".github/scripts/release_oci_index_test.py"
+      - ".github/scripts/prune_agreement_test.py"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/release-oci.yaml"
+      - ".github/workflows/chart-images.yaml"
+      - ".github/workflows/test-release-oci-index.yaml"
+      - ".github/scripts/release_oci_index_test.py"
+      - ".github/scripts/prune_agreement_test.py"
+
+permissions:
+  contents: read
+
+jobs:
+  index:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: the index's preconditions before any push; no fixture chart is published
+        run: |
+          set -euo pipefail
+          python3 -m venv /tmp/venv
+          /tmp/venv/bin/pip install --quiet "pyyaml==6.0.2"
+          PYTHONDONTWRITEBYTECODE=1 /tmp/venv/bin/python -I .github/scripts/release_oci_index_test.py .
+          PYTHONDONTWRITEBYTECODE=1 /tmp/venv/bin/python -I .github/scripts/prune_agreement_test.py .
