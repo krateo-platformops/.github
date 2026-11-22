@@ -76,7 +76,45 @@
 #
 # Collision guard: refuses to push unless OCI_REPO carries a chart-namespace path segment,
 # so a chart named e.g. `frontend` can never collide with a same-named container image at
-# the registry root. Universal, harmless for every repo.
+# the registry root. Universal, harmless for every repo. The default oci_repo is
+# krateo-platformops'; a krateo-blueprints repository must pass oci://ghcr.io/krateo-blueprints/charts,
+# and the target is compared as written: GitHub's redirect from an old org name still answers, so
+# "it resolved" is not evidence that it is right.
+#
+# The repository's own preflight runs strictly before anything is pushed, by construction: the
+# release-preflight job below (krateo-blueprints/charts PUBLISHING.md rule 12, which runs an executable
+# hack/release-preflight <version> when the repository has one) is a `needs:` of the job that pushes.
+# A caller no longer wires that order itself, so no caller can get it wrong (a release on 2026-11-07
+# was left half-published because a caller pushed before its guard ran).
+#
+# What is stamped, and checked: CHART_VERSION in Chart.yaml (version, appVersion, anywhere) and in
+# values.yaml (e.g. an image tag a chart ships at the release version), SOURCE_REF in Chart.yaml,
+# and the CompositionDefinition (ship-cd.sh). A chart opts in purely by authoring a placeholder in
+# those files. After packaging, the PACKAGE about to be pushed is read back: its Chart.yaml must be
+# readable (the check's own control), no placeholder may survive in any member outside templates/
+# (a template may carry it as text on purpose, as portal's builder templates do; a file nothing stamps
+# carrying one is refused, not published literally), and a version or appVersion that authored the
+# placeholder must carry the release version. helm semver-checks `version` but accepts any string as
+# `appVersion` or a value, so without this an unstamped placeholder packaged, pushed and published
+# with every step green. A version written literally is PUBLISHING.md rule 4's other shapes and is
+# left as written; the repository's own guard owns its agreement.
+#
+# dry_run: everything runs (image gate, preflight, discovery, stamping, packaging, the
+# CompositionDefinition check, the stamp check, the registry guard) and nothing is pushed. The
+# registry login still happens, because dependency builds read through it; the push loop is never
+# reached. Both modes upload the packages as the workflow artifact
+# `release-oci-charts`, so a rehearsal proves what it built (a green run alone does not: a run that
+# skipped its body looks the same). The input defaults to false so a tag push publishes as it always
+# did; a caller makes its manual run safe by giving its own workflow_dispatch input `dry_run` a
+# default of true and passing `dry_run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}`.
+#
+# What this workflow deliberately does not do, and where it lives instead:
+#   • Release notes, assets on the caller's GitHub release: a called workflow's permissions are capped
+#     at its caller's and this one is `contents: read`, so they are TOP-LEVEL jobs of the caller
+#     (krateo-platformops/.github release-notes.yaml is called that way), never nested here.
+#   • A digest read-back after the push: chart-push's push.sh already reads every pushed manifest back
+#     and requires the registry to serve the digest it uploaded. With the stamp check above, which
+#     reads the package itself, the published chart is the checked one byte for byte.
 name: release-oci
 
 on:
@@ -98,6 +136,14 @@ on:
         description: "Directory to search for Chart.yaml files (e.g. `helm`). Default: the whole repo, minus examples/fixtures/test/docs directories."
         type: string
         default: "."
+      dry_run:
+        description: "Run every check and build every package, push nothing (see the header). Default false: a tag push publishes."
+        type: boolean
+        default: false
+      preflight_working_directory:
+        description: "Directory holding hack/release-preflight, relative to the repository root (PUBLISHING.md rule 12)."
+        type: string
+        default: "."
 
 permissions:
   contents: read
@@ -117,8 +163,17 @@ jobs:
       app_version: ${{ inputs.app_version }}
       chart_root: ${{ inputs.chart_root }}
 
+  # The repository's own preflight, strictly before anything is pushed (see the header).
+  release-preflight:
+    uses: krateo-blueprints/charts/.github/workflows/release-preflight.yaml@0794359c611fc736f101ecc64d3a86e0ddcad718 # 1.8.0
+    permissions:
+      contents: read
+    with:
+      version: ${{ inputs.chart_version || github.ref_name }}
+      working-directory: ${{ inputs.preflight_working_directory }}
+
   package-and-push:
-    needs: [verify-images]
+    needs: [verify-images, release-preflight]
     runs-on: ubuntu-latest
     # One check-and-push at a time per repository. Without it, two releases of one repo that overlap,
     # e.g. two tags pushed close together, or a tag and a workflow_dispatch, could both find a
@@ -270,6 +325,8 @@ jobs:
           rm -rf "${tmp}"
           echo "yq verified and installed: $(yq --version)  (${arch}, sha256 ${sha})"
 
+      # Also in a dry run: the login is what lets `helm dependency build` read a private OCI dependency,
+      # so a rehearsal without it would package a different chart than the release. It pushes nothing.
       - name: Registry login
         run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
 
@@ -300,6 +357,7 @@ jobs:
           GIT_SHA: ${{ github.sha }}
           SRC_URL: ${{ github.server_url }}/${{ github.repository }}
           SRC_REF: ${{ github.ref_name }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           set -euo pipefail
           if [ ! -d "${CHART_ROOT:-.}" ]; then
@@ -332,8 +390,17 @@ jobs:
           declare -A without_cd_of=()
           for d in "${charts[@]}"; do
             echo "::group::package ${d}"
-            # Opt-in placeholder substitution (untouched if a placeholder is absent).
+            # Which fields AUTHORED the placeholder, read before stamping: those must carry the release version
+            # afterwards (the stamp check below). A field written literally is PUBLISHING.md rule 4's other
+            # shapes (a chart versioned on its own, e.g. a served API version) and is left as written.
+            ver_placeholder="$(yq -r '.version // ""' "${d}/Chart.yaml" | grep -c -E 'CHART_VERSION' || true)"
+            app_placeholder="$(yq -r '.appVersion // ""' "${d}/Chart.yaml" | grep -c -E 'CHART_VERSION' || true)"
+            # Opt-in placeholder substitution (untouched if a placeholder is absent). Global, never anchored
+            # on a key: a substitution anchored to `version:` leaves appVersion as the literal placeholder.
             sed -i "s/CHART_VERSION/${CHART_VERSION}/g; s/SOURCE_REF/${CHART_VERSION}/g" "${d}/Chart.yaml"
+            if [ -f "${d}/values.yaml" ]; then
+              sed -i "s/CHART_VERSION/${CHART_VERSION}/g" "${d}/values.yaml"
+            fi
 
             # Stamp PROVENANCE as OCI annotations, so a published chart says which commit built it
             # instead of leaving a consumer to reverse-engineer it. installer's check-pin-ci gate has
@@ -423,6 +490,43 @@ jobs:
               exit 1
             fi
             echo "provenance: $(basename "${tgz_of[${d}]}") -> ${stamped}"
+
+            # BEGIN stamp check (.github/scripts/release_oci_stamp_test.py runs it, and deletes it)
+            # Read out of the PACKAGE about to be pushed, never the working tree (see the header). Three checks,
+            # each failing as "about to publish ...", never as a chart error:
+            #  1. the package's Chart.yaml is readable at <name>/Chart.yaml: every helm package has one, so an
+            #     empty read means the check below would pass by failing to look;
+            #  2. no CHART_VERSION/SOURCE_REF survives in any member outside templates/ (where a template may
+            #     carry the placeholder as text on purpose); a file nothing stamps (e.g. values.schema.json)
+            #     carrying one is refused rather than published literally;
+            #  3. a field that authored the placeholder (version, appVersion) carries the release version.
+            pkg_chart="$(tar -xzOf "${tgz_of[${d}]}" "${cname}/Chart.yaml" 2>/dev/null || true)"
+            if [ -z "${pkg_chart}" ]; then
+              echo "::error::${d}: about to publish without checking it: cannot read ${cname}/Chart.yaml out of $(basename "${tgz_of[${d}]}"), so the stamp check would pass by failing to look. Nothing is pushed."
+              exit 1
+            fi
+            survivors=""
+            while IFS= read -r member; do
+              case "${member}" in "${cname}/templates/"*|*/) continue ;; esac
+              if tar -xzOf "${tgz_of[${d}]}" "${member}" 2>/dev/null | grep -q -E 'CHART_VERSION|SOURCE_REF'; then
+                survivors="${survivors} ${member#"${cname}/"}"
+              fi
+            done < <(tar -tzf "${tgz_of[${d}]}")
+            if [ -n "${survivors}" ]; then
+              echo "::error::${d}: about to publish an unstamped placeholder: CHART_VERSION or SOURCE_REF survives in${survivors} of $(basename "${tgz_of[${d}]}"). Only Chart.yaml, values.yaml and the CompositionDefinition are stamped. Nothing is pushed."
+              exit 1
+            fi
+            pkg_ver="$(yq -r '.version // ""' <<< "${pkg_chart}")"
+            pkg_app="$(yq -r '.appVersion // ""' <<< "${pkg_chart}")"
+            if [ "${ver_placeholder:-0}" != 0 ] && [ "${pkg_ver}" != "${CHART_VERSION}" ]; then
+              echo "::error::${d}: about to publish the wrong version: version authored the placeholder but the package carries '${pkg_ver}', not the release version '${CHART_VERSION}'. Nothing is pushed."
+              exit 1
+            fi
+            if [ "${app_placeholder:-0}" != 0 ] && [ "${pkg_app}" != "${CHART_VERSION}" ]; then
+              echo "::error::${d}: about to publish the wrong version: appVersion authored the placeholder but the package carries '${pkg_app}', not the release version '${CHART_VERSION}'. Nothing is pushed."
+              exit 1
+            fi
+            # END stamp check
             echo "::endgroup::"
           done
 
@@ -479,6 +583,12 @@ jobs:
             exit 1
           fi
 
+          # A dry run stops here: every check has run, nothing is pushed.
+          if [ "${DRY_RUN:-false}" = "true" ]; then
+            echo "::notice::dry run: nothing pushed. Would push: $(for d in "${charts[@]}"; do [ -z "${skip_of[${d}]:-}" ] && printf '%s ' "$(basename "${tgz_of[${d}]}")"; done)| already published, identical: ${#skip_of[@]}"
+            exit 0
+          fi
+
           # Push every chart, app charts first, and fail at the end naming what did not publish. Stopping
           # at the first failure (alphabetical order) let one refused chart leave the rest unpublished;
           # pushing blindly would instead let `<x>-crds` publish at a version whose `<x>` never did.
@@ -514,3 +624,13 @@ jobs:
             exit 1
           fi
           echo "done: pushed $(( ${#ok_of[@]} - ${#skip_of[@]} )), skipped ${#skip_of[@]} already published with identical contents, of ${#charts[@]} chart(s)"
+
+      # The packages this run built, in both modes: a rehearsal's proof of what it would have pushed,
+      # and a release's record of what it did (see the header).
+      - name: Upload the packages
+        if: ${{ always() && hashFiles('dist/*.tgz') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-oci-charts
+          path: dist/*.tgz
+          if-no-files-found: error
