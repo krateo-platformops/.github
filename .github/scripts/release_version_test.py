@@ -120,9 +120,18 @@ for f in (".github/workflows/release-preflight.yaml", ".github/actions/index-gat
     print("%s  CORE is charts' %s PLAIN_VERSION at %s, byte for byte" % ("ok  " if same else "FAIL", f, CHARTS_REF))
     if not same:
         failures.append("CORE %r is not charts' %s PLAIN_VERSION %r" % (core, f, plain[0]))
+    # The preflight accepts a pre-release for a release that is never indexed (allow-prerelease, charts 1.11.0):
+    # its identifier pattern must be release-oci's, so the two accept the same pre-releases.
+    if f.endswith("release-preflight.yaml"):
+        theirs = [m[1] for m in PRE_LINE.findall(text)]
+        ours = PRE_LINE.findall(script)[0][1]
+        same_pre = len(theirs) == 1 and theirs[0] == ours
+        print("%s  PRE_ID is charts' release-preflight.yaml PRE_ID at %s, byte for byte" % ("ok  " if same_pre else "FAIL", CHARTS_REF))
+        if not same_pre:
+            failures.append("PRE_ID %r is not charts' release-preflight PRE_ID %r" % (ours, theirs))
 
 if failures:
     for x in failures:
         print("FAIL: " + x)
     sys.exit(1)
-print("OK: %d accepted, %d refused, 3 mutants caught, CORE identical to charts' PLAIN_VERSION" % (len(OK), len(BAD)))
+print("OK: %d accepted, %d refused, 3 mutants caught, CORE identical to charts' PLAIN_VERSION, PRE_ID to its preflight's" % (len(OK), len(BAD)))
