@@ -249,12 +249,15 @@ jobs:
 
   # The repository's own preflight, strictly before anything is pushed (see the header).
   release-preflight:
-    uses: krateo-blueprints/charts/.github/workflows/release-preflight.yaml@0ef7c10e78c911565607c944ce7344de63e7b6cb # 1.9.3
+    uses: krateo-blueprints/charts/.github/workflows/release-preflight.yaml@db05838e80afecd49ec1fded8daac207bf780ec1 # 1.11.0
     permissions:
       contents: read
     with:
       version: ${{ inputs.chart_version || github.ref_name }}
       working-directory: ${{ inputs.preflight_working_directory }}
+      # A pre-release only for a chart that is never indexed: the index refuses one (PUBLISHING.md rule 13),
+      # and the index gate below refuses it for any other channel before anything is pushed.
+      allow-prerelease: ${{ inputs.index_channel == 'none' }}
 
   package-and-push:
     needs: [verify-images, release-preflight, index-preflight]
@@ -434,7 +437,7 @@ jobs:
       # the step below after packaging and before anything is pushed, for any index_channel but none.
       - name: Index gate
         id: index-gate
-        uses: krateo-blueprints/charts/.github/actions/index-gate@0ef7c10e78c911565607c944ce7344de63e7b6cb # 1.9.3
+        uses: krateo-blueprints/charts/.github/actions/index-gate@db05838e80afecd49ec1fded8daac207bf780ec1 # 1.11.0
 
       - name: Discover, version, package & push every first-class chart
         id: release
@@ -803,7 +806,7 @@ jobs:
   # The org's one index publisher, pinned by commit (PUBLISHING.md rule 9): it receives the publish token.
   publish-index:
     needs: [collect]
-    uses: krateo-blueprints/charts/.github/workflows/publish-chart.yaml@0ef7c10e78c911565607c944ce7344de63e7b6cb # 1.9.3
+    uses: krateo-blueprints/charts/.github/workflows/publish-chart.yaml@db05838e80afecd49ec1fded8daac207bf780ec1 # 1.11.0
     with:
       source_repo: ${{ github.repository }}
       git_tag: ${{ inputs.chart_version || github.ref_name }}

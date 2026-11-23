@@ -96,6 +96,8 @@ checks = [
     ("the gate call comes after packaging and before the registry guard and the push", 0 <= pkg < call < loop_end < pushdef),
     ("the gate call is guarded by the channel not being none", '"${INDEX_CHANNEL:-none}" != none' in gate_block and "INDEX_GATE" in gate_block),
     ("release-preflight, index-gate and publish-chart are pinned to one charts commit", len(pins) == 3 and len(set(pins)) == 1),
+    ("the preflight allows a pre-release exactly when index_channel is none",
+     str(jobs.get("release-preflight", {}).get("with", {}).get("allow-prerelease", "")).replace(" ", "") == "${{inputs.index_channel=='none'}}"),
 ]
 collect = jobs.get("collect", {})
 publish = jobs.get("publish-index", {})
