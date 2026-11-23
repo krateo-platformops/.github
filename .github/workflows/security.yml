@@ -399,6 +399,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: azure/setup-helm@v4
+        with:
+          # The helm every chart workflow here pins (release-oci, chart-images). Unset, setup-helm installs "latest".
+          version: v3.19.0
       - name: helm lint
         run: |
           for c in $(git ls-files '**/Chart.yaml' 'Chart.yaml' | xargs -n1 dirname | sort -u); do
