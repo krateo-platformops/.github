@@ -1,0 +1,53 @@
+# NOT reusable: this repo's own check that every workflow's chart-push pin passes TODAY's push rules, by contents,
+# not by ancestry (.github/scripts/pinned_chart_push_test.py). test-chart-push.yaml tests the working tree's
+# push.sh; a pin moved to another commit is never tested by it. Commit 5f126b7 put the registry credential on curl's
+# command line, and a pin moved back there passed every other check. The negative control (5f126b7 must fail) runs
+# here too, so a test that passes everything is caught.
+name: test-pinned-chart-push
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/**"
+      - ".github/actions/chart-push/**"
+      - ".github/scripts/pinned_chart_push_test.py"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/**"
+      - ".github/actions/chart-push/**"
+      - ".github/scripts/pinned_chart_push_test.py"
+
+permissions:
+  contents: read
+
+jobs:
+  pinned-chart-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2 # v5.0.0
+        with:
+          version: v3.19.0
+      - name: every pinned chart-push passes today's push rules; the credential-on-argv commit does not
+        run: |
+          set -euo pipefail
+          python3 -m venv /tmp/venv
+          /tmp/venv/bin/pip install --quiet "pyyaml==6.0.2"
+          export PYTHONDONTWRITEBYTECODE=1
+          /tmp/venv/bin/python -I .github/scripts/pinned_chart_push_test.py .
+          # Negative control: 5f126b7 put the credential on curl's argv. The check must refuse it (exit 1, not VOID 2).
+          set +e
+          out="$(/tmp/venv/bin/python -I .github/scripts/pinned_chart_push_test.py . --sha 5f126b7d93ec5302eb9cc57a3af157550175fbaf 2>&1)"
+          rc=$?
+          set -e
+          if [ "${rc}" -ne 1 ] || ! grep -q 'on a command line' <<< "${out}"; then
+            echo "${out}"
+            echo "::error::negative control: chart-push@5f126b7 (credential on curl's argv) was not refused for it (exit ${rc})"
+            exit 1
+          fi
+          echo "negative control: chart-push@5f126b7 refused, credential on a command line"
