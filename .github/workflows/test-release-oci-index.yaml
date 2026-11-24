@@ -2,7 +2,8 @@
 # anything is pushed (.github/scripts/release_oci_index_test.py: the preflight run as written over channel and
 # token cases, its deletion, and the gate call's place and guard), and that it never publishes a chart the
 # repository standard calls a fixture (.github/scripts/prune_agreement_test.py, reading the standard at the
-# krateo-blueprints/charts commit release-oci pins).
+# krateo-blueprints/charts commit release-oci pins), and that the gate it runs before the push is the one
+# publish-chart runs at index time (.github/scripts/gate_agreement_test.py).
 name: test-release-oci-index
 
 on:
@@ -13,6 +14,7 @@ on:
       - ".github/workflows/test-release-oci-index.yaml"
       - ".github/scripts/release_oci_index_test.py"
       - ".github/scripts/prune_agreement_test.py"
+      - ".github/scripts/gate_agreement_test.py"
   push:
     branches:
       - main
@@ -22,6 +24,7 @@ on:
       - ".github/workflows/test-release-oci-index.yaml"
       - ".github/scripts/release_oci_index_test.py"
       - ".github/scripts/prune_agreement_test.py"
+      - ".github/scripts/gate_agreement_test.py"
 
 permissions:
   contents: read
@@ -40,3 +43,4 @@ jobs:
           /tmp/venv/bin/pip install --quiet "pyyaml==6.0.2"
           PYTHONDONTWRITEBYTECODE=1 /tmp/venv/bin/python -I .github/scripts/release_oci_index_test.py .
           PYTHONDONTWRITEBYTECODE=1 /tmp/venv/bin/python -I .github/scripts/prune_agreement_test.py .
+          PYTHONDONTWRITEBYTECODE=1 /tmp/venv/bin/python -I .github/scripts/gate_agreement_test.py .
