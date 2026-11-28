@@ -1,0 +1,4 @@
+apiVersion: v2
+name: one-object
+version: CHART_VERSION
+appVersion: APP_VERSION

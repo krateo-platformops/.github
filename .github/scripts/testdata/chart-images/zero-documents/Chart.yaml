@@ -1,0 +1,4 @@
+apiVersion: v2
+name: zero-documents
+version: CHART_VERSION
+appVersion: APP_VERSION
