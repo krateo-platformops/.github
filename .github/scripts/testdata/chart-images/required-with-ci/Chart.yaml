@@ -1,0 +1,4 @@
+apiVersion: v2
+name: required-with-ci
+version: CHART_VERSION
+appVersion: APP_VERSION

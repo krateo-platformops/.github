@@ -187,7 +187,11 @@ jobs:
               if docs="$(yq eval-all '[select(tag == "!!map" and has("kind"))] | length' "$rendered" 2>/dev/null | tail -1)" \
                  && [[ "$docs" =~ ^[0-9]+$ ]]; then
                 if [ "$docs" -eq 0 ]; then
-                  echo "::warning::${name} was not inspected: it rendered no objects with the values given, so no image of it was checked. A ci/*-values.yaml in ${d} providing the values that switch its templates on fixes this."
+                  # The .helmignore sentence below repeats the cannot-render notice's on purpose. The two
+                  # messages reach different readers -- the owner of a broken chart, the owner of a healthy
+                  # one -- and the remedy (a ci/ values file, kept out of the package) is the same for both,
+                  # so neither should have to be told to go and read the other.
+                  echo "::warning::${name} was not inspected: it rendered no objects with the values given, so no image of it was checked. A ci/*-values.yaml in ${d} providing the values that switch its templates on fixes this. A .helmignore listing ci/ and .helmignore keeps those files out of the published package, so adding them costs no chart version bump."
                 fi
               else
                 echo "::warning::${name}: could not count the rendered documents, so a render with no objects would not have been flagged"

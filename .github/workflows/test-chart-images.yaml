@@ -1,0 +1,41 @@
+# NOT reusable: this repo's own check of chart-images.yaml's two advisory messages -- the cannot-render
+# notice and the zero-document warning -- run against fixture charts
+# (.github/scripts/chart_images_test.py, .github/scripts/testdata/chart-images/). No real caller can reach
+# the first, so these fixtures are its only coverage.
+name: test-chart-images
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/chart-images.yaml"
+      - ".github/workflows/test-chart-images.yaml"
+      - ".github/scripts/chart_images_test.py"
+      - ".github/scripts/testdata/chart-images/**"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/chart-images.yaml"
+      - ".github/workflows/test-chart-images.yaml"
+      - ".github/scripts/chart_images_test.py"
+      - ".github/scripts/testdata/chart-images/**"
+
+permissions:
+  contents: read
+
+jobs:
+  test-chart-images:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2 # v5.0.0
+        with:
+          version: v3.19.0
+      - name: the gate's cannot-render notice and zero-document warning fire as designed, and only there
+        run: |
+          set -euo pipefail
+          python3 -m venv /tmp/venv
+          /tmp/venv/bin/pip install --quiet "pyyaml==6.0.2"
+          PYTHONDONTWRITEBYTECODE=1 /tmp/venv/bin/python -I .github/scripts/chart_images_test.py .
