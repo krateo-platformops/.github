@@ -173,7 +173,25 @@ jobs:
             rendered="$work/$name.rendered.yaml"
             if ! helm template verify "$work/$name" "${kvargs[@]}" "${vals[@]}" > "$rendered" 2> "$work/$name.err"; then
               echo "::error::${name} did not render, so its images could NOT be checked. A release gate that cannot inspect a chart has not verified it. $(head -c 300 "$work/$name.err")"
+              # Say how to fix it, not only that it is broken: the usual cause is a chart whose defaults
+              # are not a valid configuration, and the fix is a file the chart can carry itself.
+              echo "::notice::${name}: a chart that needs values to render can ship ${d}/ci/*-values.yaml (Helm's chart-testing convention); this gate passes each one to helm template. A .helmignore listing ci/ and .helmignore keeps those files out of the published package."
               skipped+=("${name}")
+            else
+              # A render that succeeds can still contain nothing: a chart whose objects all sit behind
+              # values that default to off renders zero documents, and zero images inspected looks the
+              # same as a pass. Count the documents the way a consumer would -- parse the stream, count
+              # the non-empty ones that have a `kind` -- not by grepping the text, which a comment or a
+              # `kind:` inside a ConfigMap would satisfy. yq is on ubuntu-latest and already what
+              # release-oci's index gate parses with. Advisory: the job does not fail on it.
+              if docs="$(yq eval-all '[select(tag == "!!map" and has("kind"))] | length' "$rendered" 2>/dev/null | tail -1)" \
+                 && [[ "$docs" =~ ^[0-9]+$ ]]; then
+                if [ "$docs" -eq 0 ]; then
+                  echo "::warning::${name} was not inspected: it rendered no objects with the values given, so no image of it was checked. A ci/*-values.yaml in ${d} providing the values that switch its templates on fixes this."
+                fi
+              else
+                echo "::warning::${name}: could not count the rendered documents, so a render with no objects would not have been flagged"
+              fi
             fi
 
             # Grep the rendered output rather than parsing YAML: images appear both as container `image:`
